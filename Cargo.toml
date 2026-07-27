@@ -1,0 +1,48 @@
+[package]
+name = "rocksdb-dedup"
+version = "0.1.0"
+edition = "2021"
+description = "基于RocksDB与布隆过滤器的高并发持久化去重引擎，用于爬虫场景"
+
+[dependencies]
+# RocksDB 绑定
+rocksdb = "0.22"
+
+# 布隆过滤器
+bloomfilter = "1.0"
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# Hash 函数（高性能，用于 key/namespace 哈希）
+xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
+# 128-bit 哈希用 xxh3_128，包含在 xxh3 feature 中
+
+# 错误处理
+thiserror = "1"
+anyhow = "1"
+
+# 原子引用计数（双缓冲切换用）
+arc-swap = "1"
+
+# 轻量级锁
+parking_lot = "0.12"
+
+# 时间处理
+chrono = "0.4"
+
+# 配置
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 指标/监控
+metrics = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "dedup_bench"
+harness = false
