@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package dedup.v1;
+
+// ============================================================
+//  去重服务 (Dedup Service)
+//  基于 RocksDB + 布隆过滤器的高并发持久化去重引擎
+//
+//  核心语义：
+//    - namespace: 业务命名空间，不同业务之间数据隔离
+//    - key:       去重键（如 URL、任务ID等）
+//    - expire_at: 绝对过期时间戳（秒或毫秒，由调用方约定）
+// ============================================================
+
+service DedupService {
+  // 检查 key 是否存在，不存在则写入（原子操作）
+  // 这是最核心的接口，爬虫去重的主要使用方式
+  rpc CheckAndSet(CheckAndSetRequest) returns (CheckAndSetResponse);
+
+  // 批量检查并写入（减少 RPC 次数，高 QPS 场景推荐）
+  rpc BatchCheckAndSet(BatchCheckAndSetRequest) returns (BatchCheckAndSetResponse);
+
+  // 仅检查 key 是否存在（不写入）
+  rpc Exists(ExistsRequest) returns (ExistsResponse);
+
+  // 批量检查是否存在
+  rpc BatchExists(BatchExistsRequest) returns (BatchExistsResponse);
+
+  // 获取 key 的详细信息（过期时间、创建时间、元数据）
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // 删除 key（用于手动清理或纠错）
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // 批量删除
+  rpc BatchDelete(BatchDeleteRequest) returns (BatchDeleteResponse);
+
+  // 获取服务状态（监控用）
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+
+// ============================================================
+//  消息定义
+// ============================================================
+
+// ---------- CheckAndSet ----------
+
+message CheckAndSetRequest {
+  string namespace       = 1;  // 业务命名空间，如 "spider_news", "spider_image"
+  bytes  key             = 2;  // 去重键（bytes 支持任意二进制 key，如 URL hash）
+  uint64 expire_at_ms    = 3;  // 绝对过期时间（毫秒时间戳）
+  bytes  metadata        = 4;  // 可选：附加元数据（如原始 URL、任务信息）
+}
+
+message CheckAndSetResponse {
+  CheckResult result     = 1;  // 检查结果
+  DedupValue value       = 2;  // 当前 key 的值（无论是新写入的还是已存在的）
+}
+
+enum CheckResult {
+  INSERTED               = 0;  // 不存在，已成功写入
+  DUPLICATE              = 1;  // 已存在（未过期）
+  EXPIRED_AND_REPLACED   = 2;  // 已过期，已用新值替换
+}
+
+// ---------- BatchCheckAndSet ----------
+
+message BatchCheckAndSetRequest {
+  repeated CheckAndSetRequest items = 1;  // 批量条目（建议单次不超过 1000）
+}
+
+message BatchCheckAndSetResponse {
+  repeated CheckAndSetResponse results = 1;  // 结果顺序与请求一致
+}
+
+// ---------- Exists ----------
+
+message ExistsRequest {
+  string namespace = 1;
+  bytes  key       = 2;
+}
+
+message ExistsResponse {
+  bool exists      = 1;  // 是否存在且未过期
+}
+
+// ---------- BatchExists ----------
+
+message BatchExistsRequest {
+  string           namespace = 1;
+  repeated bytes   keys      = 2;  // 同一 namespace 下的多个 key
+}
+
+message BatchExistsResponse {
+  repeated bool exists = 1;  // 顺序与请求 keys 一致
+}
+
+// ---------- Get ----------
+
+message GetRequest {
+  string namespace = 1;
+  bytes  key       = 2;
+}
+
+message GetResponse {
+  bool        found  = 1;  // 是否找到（未过期）
+  DedupValue  value  = 2;  // key 的详细信息
+}
+
+// ---------- Delete ----------
+
+message DeleteRequest {
+  string namespace = 1;
+  bytes  key       = 2;
+}
+
+message DeleteResponse {
+  bool deleted     = 1;  // 是否成功删除（key 不存在返回 false）
+}
+
+// ---------- BatchDelete ----------
+
+message BatchDeleteRequest {
+  string         namespace = 1;
+  repeated bytes keys      = 2;
+}
+
+message BatchDeleteResponse {
+  repeated bool deleted = 1;  // 顺序与请求 keys 一致
+}
+
+// ---------- Stats ----------
+
+message StatsRequest {
+  string namespace = 1;  // 可选：指定 namespace，留空返回全局统计
+}
+
+message StatsResponse {
+  // 全局统计
+  uint64 total_keys        = 1;  // 估算的总 key 数（含过期未清理的）
+  uint64 bloom_capacity    = 2;  // 布隆过滤器设计容量
+  uint64 bloom_insertions  = 3;  // 布隆过滤器当前插入量
+  double bloom_fpp         = 4;  // 布隆过滤器预估误判率
+
+  // 清理器统计
+  uint64 cleaned_total     = 5;  // 累计清理的过期 key 数
+  uint64 backlog_estimate  = 6;  // 过期数据积压估算量
+  uint64 current_speed     = 7;  // 当前清理速度（keys/秒）
+
+  // 性能统计
+  uint64 qps_estimate      = 8;  // 估算的 QPS
+  uint64 error_count       = 9;  // 错误计数
+}
+
+// ============================================================
+//  通用数据结构
+// ============================================================
+
+message DedupValue {
+  uint64 expire_at_ms  = 1;  // 过期时间（毫秒时间戳）
+  uint64 created_at_ms = 2;  // 创建时间（毫秒时间戳）
+  bytes  metadata      = 3;  // 附加元数据（可选）
+}

@@ -13,8 +13,10 @@ pub mod bloom;
 pub mod storage;
 pub mod cleaner;
 pub mod engine;
+pub mod server;
 
 pub use config::DedupConfig;
 pub use engine::DedupEngine;
 pub use error::DedupError;
 pub use key::{DedupValue, NamespaceId};
+pub use server::{serve, DedupServiceServer, DedupServiceImpl};

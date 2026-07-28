@@ -42,3 +42,6 @@ coverage/
 
 # 本地配置
 *.local
+
+# 数据文件
+data/

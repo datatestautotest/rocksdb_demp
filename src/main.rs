@@ -1,13 +1,110 @@
-//! 去重引擎示例程序
+//! 去重引擎入口程序
+//!
+//! 支持两种运行模式：
+//! - `demo`：运行内置示例（默认）
+//! - `serve`：启动 gRPC 服务
 
+use std::sync::Arc;
+
+use clap::{Parser, Subcommand};
 use rocksdb_dedup::{DedupConfig, DedupEngine};
+
+#[derive(Parser)]
+#[command(name = "rocksdb-dedup", version, about = "基于 RocksDB 的高并发去重服务")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// 运行演示程序
+    Demo {
+        /// 数据目录
+        #[arg(long, default_value = "./data/dedup_demo")]
+        db_path: String,
+    },
+    /// 启动 gRPC 服务
+    Serve {
+        /// 监听地址
+        #[arg(long, default_value = "0.0.0.0:50051")]
+        addr: String,
+
+        /// 数据目录
+        #[arg(long, default_value = "./data/dedup")]
+        db_path: String,
+
+        /// 布隆过滤器容量
+        #[arg(long, default_value_t = 10_000_000)]
+        bloom_capacity: u64,
+
+        /// 布隆过滤器误判率
+        #[arg(long, default_value_t = 0.01)]
+        bloom_fpp: f64,
+
+        /// 清理批大小
+        #[arg(long, default_value_t = 10_000)]
+        cleaner_batch_size: usize,
+    },
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or(Commands::Demo {
+        db_path: "./data/dedup_demo".to_string(),
+    }) {
+        Commands::Demo { db_path } => run_demo(db_path).await,
+        Commands::Serve {
+            addr,
+            db_path,
+            bloom_capacity,
+            bloom_fpp,
+            cleaner_batch_size,
+        } => run_serve(addr, db_path, bloom_capacity, bloom_fpp, cleaner_batch_size).await,
+    }
+}
+
+async fn run_serve(
+    addr: String,
+    db_path: String,
+    bloom_capacity: u64,
+    bloom_fpp: f64,
+    cleaner_batch_size: usize,
+) -> anyhow::Result<()> {
+    let config = DedupConfig {
+        db_path,
+        bloom_capacity,
+        bloom_false_positive_rate: bloom_fpp,
+        bloom_rebuild_interval_secs: 3600,
+        bloom_expand_threshold: 0.8,
+        bloom_expand_factor: 1.5,
+        cleaner_interval_secs: 60,
+        cleaner_batch_size,
+        cleaner_batch_sleep_ms: 5,
+        max_metadata_size: 4096,
+    };
+
+    println!("=== RocksDB 去重 gRPC 服务 ===");
+    println!("数据目录: {}", config.db_path);
+    println!("布隆容量: {}", config.bloom_capacity);
+    println!("误判率: {}", config.bloom_false_positive_rate);
+
+    let engine = DedupEngine::open(config).await?;
+    let engine = Arc::new(engine);
+
+    let socket_addr: std::net::SocketAddr = addr.parse()?;
+    rocksdb_dedup::serve(engine, socket_addr).await?;
+
+    Ok(())
+}
+
+async fn run_demo(db_path: String) -> anyhow::Result<()> {
     println!("=== RocksDB 去重引擎示例 ===");
 
     let config = DedupConfig {
-        db_path: "./data/dedup_demo".to_string(),
+        db_path,
         bloom_capacity: 1_000_000,
         bloom_false_positive_rate: 0.01,
         bloom_rebuild_interval_secs: 3600,
