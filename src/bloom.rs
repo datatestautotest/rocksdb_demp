@@ -171,8 +171,13 @@ impl BloomManager {
         let usage = current.usage_ratio();
         let fpr = self.estimated_false_positive_rate();
 
+        // 三个触发条件（满足任一就扩容）：
+        // 1. 使用率超过扩容阈值（默认 80%）
+        // 2. 观测误判率超过配置的 1.5 倍
+        // 3. 使用率超过 100%（紧急情况，必须立即扩容）
         usage > self.config.bloom_expand_threshold
             || fpr > self.config.bloom_false_positive_rate * 1.5
+            || usage >= 1.0
     }
 
     /// 从 RocksDB 全量重建布隆过滤器（在后台线程调用

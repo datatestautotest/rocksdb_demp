@@ -77,6 +77,10 @@ pub struct DedupEngine {
     rebuild_handle: Option<JoinHandle<()>>,
     /// 布隆过滤器重建停止信号
     rebuild_stop_tx: Option<mpsc::Sender<()>>,
+    /// 布隆过滤器扩容检查任务句柄（高频检查）
+    expand_handle: Option<JoinHandle<()>>,
+    /// 扩容检查停止信号
+    expand_stop_tx: Option<mpsc::Sender<()>>,
 }
 
 impl DedupEngine {
@@ -93,6 +97,8 @@ impl DedupEngine {
             config,
             rebuild_handle: None,
             rebuild_stop_tx: None,
+            expand_handle: None,
+            expand_stop_tx: None,
         };
 
         // 启动后台任务
@@ -111,10 +117,63 @@ impl DedupEngine {
         // 启动过期清理器
         self.cleaner.start();
 
-        // 启动布隆过滤器重建任务
+        // 启动布隆过滤器定时重建任务
         self.start_bloom_rebuild_task();
 
+        // 启动布隆过滤器扩容检查任务（高频，每 60 秒检查一次）
+        self.start_bloom_expand_check_task();
+
         Ok(())
+    }
+
+    /// 启动布隆过滤器扩容检查任务（高频检查容量，及时扩容）
+    fn start_bloom_expand_check_task(&mut self) {
+        let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+        let bloom = self.bloom.clone();
+        let store = self.store.clone();
+
+        let handle = tokio::spawn(async move {
+            // 每 60 秒检查一次是否需要扩容
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            // 第一帧跳过
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if bloom.needs_rebuild() {
+                            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                            let stats = bloom.stats();
+                            tracing_info(&format!(
+                                "[bloom] 检测到需要扩容 (使用率 {:.1}%, 观测误判率 {:.4}%)，开始扩容重建...",
+                                stats.usage_ratio * 100.0,
+                                stats.estimated_fpr * 100.0
+                            ));
+                            match bloom.expand_rebuild(&store, now_ms) {
+                                Ok(count) => {
+                                    let new_stats = bloom.stats();
+                                    tracing_info(&format!(
+                                        "[bloom] 扩容重建完成，插入 {} 条，新容量 {} (使用率 {:.1}%)",
+                                        count,
+                                        new_stats.capacity,
+                                        new_stats.usage_ratio * 100.0
+                                    ));
+                                }
+                                Err(e) => {
+                                    eprintln!("[bloom] 扩容重建失败: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    _ = stop_rx.recv() => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.expand_stop_tx = Some(stop_tx);
+        self.expand_handle = Some(handle);
     }
 
     /// 启动布隆过滤器定时重建 + 自动扩容任务
@@ -381,6 +440,14 @@ impl DedupEngine {
 
     /// 优雅关闭：停止后台任务，刷写数据
     pub async fn shutdown(mut self) -> Result<()> {
+        // 停止布隆过滤器扩容检查
+        if let Some(tx) = self.expand_stop_tx.take() {
+            let _ = tx.send(()).await;
+        }
+        if let Some(handle) = self.expand_handle.take() {
+            let _ = handle.await;
+        }
+
         // 停止布隆过滤器重建
         if let Some(tx) = self.rebuild_stop_tx.take() {
             let _ = tx.send(()).await;

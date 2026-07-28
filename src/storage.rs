@@ -267,6 +267,29 @@ impl DedupStore {
         }
         Ok(count)
     }
+
+    /// 估算 cf_dedup 中的 Key 总数（近似值，快速返回，O(1)）
+    ///
+    /// 基于 RocksDB 的 SST 文件元数据估算，不做全表扫描。
+    /// 注意：这是所有 key 的估算数（含过期的），不是有效 key 数。
+    pub fn estimate_total_keys(&self) -> u64 {
+        let cf = self.cf_dedup();
+        // rocksdb.estimate-num-keys 是 SST 中的估算 key 数
+        // 不包含 memtable 中的数据，所以是近似值
+        self.db
+            .property_int_value_cf(cf, "rocksdb.estimate-num-keys")
+            .unwrap_or(Some(0))
+            .unwrap_or(0)
+    }
+
+    /// 估算 live 数据大小（字节）
+    pub fn estimate_live_data_size(&self) -> u64 {
+        let cf = self.cf_dedup();
+        self.db
+            .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")
+            .unwrap_or(Some(0))
+            .unwrap_or(0)
+    }
 }
 
 /// cf_expire 迭代器封装

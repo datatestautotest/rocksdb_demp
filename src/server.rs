@@ -212,8 +212,8 @@ impl DedupService for DedupServiceImpl {
         let bloom = self.engine.bloom_stats();
         let cleaner = self.engine.cleaner_stats();
 
-        // 估算有效 key 数（注意：全表扫描很慢，这里用布隆插入量近似）
-        let total_keys = bloom.inserted;
+        // 用 RocksDB 的估算 key 数（含过期的，比布隆插入量更准确）
+        let total_keys = self.engine.store().estimate_total_keys();
 
         let resp = pb::StatsResponse {
             total_keys,
@@ -223,7 +223,7 @@ impl DedupService for DedupServiceImpl {
             cleaned_total: cleaner.total_deleted,
             backlog_estimate: cleaner.backlog_estimate,
             current_speed: cleaner.current_speed as u64,
-            qps_estimate: 0, // TODO: 接入 metrics
+            qps_estimate: bloom.total_checks / 60, // 粗略估算：总查询数 / 60秒
             error_count: 0,
         };
 
