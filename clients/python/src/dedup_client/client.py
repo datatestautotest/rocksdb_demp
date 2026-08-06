@@ -1,11 +1,5 @@
 """
-RocksDB 去重服务 Python 客户端
-
-依赖安装:
-    pip install grpcio grpcio-tools
-
-生成 gRPC 代码:
-    python -m grpc_tools.protoc -I../../proto --python_out=. --grpc_python_out=. ../../proto/dedup.proto
+RocksDB 去重服务 gRPC 客户端
 
 使用示例:
     from dedup_client import DedupClient
@@ -30,19 +24,20 @@ from typing import Optional, List, Tuple
 
 import grpc
 
-# 生成的 gRPC 代码
-try:
-    import dedup_pb2
-    import dedup_pb2_grpc
-except ImportError:
-    raise ImportError(
-        "请先生成 gRPC 代码: "
-        "python -m grpc_tools.protoc -I../../proto --python_out=. --grpc_python_out=. ../../proto/dedup.proto"
-    )
+from . import dedup_pb2
+from . import dedup_pb2_grpc
 
 
 class DedupClient:
-    """去重服务 gRPC 客户端"""
+    """去重服务 gRPC 客户端
+
+    提供基于 RocksDB + 布隆过滤器的高性能持久化去重能力，
+    支持多租户 namespace 隔离、原子检查写入、批量操作等。
+
+    Attributes:
+        addr: 服务端地址，如 "localhost:50051"
+        timeout: 默认超时时间（秒）
+    """
 
     def __init__(self, addr: str, timeout: float = 5.0):
         """
@@ -79,6 +74,12 @@ class DedupClient:
         """
         检查 key 是否存在，不存在则写入（原子操作）
 
+        Args:
+            namespace: 业务命名空间，不同业务之间数据隔离
+            key: 去重键（bytes，支持任意二进制 key）
+            expire_at_ms: 绝对过期时间（毫秒时间戳）
+            metadata: 可选附加元数据
+
         Returns:
             "inserted" - 新写入
             "duplicate" - 已存在（未过期）
@@ -98,7 +99,7 @@ class DedupClient:
         items: List[Tuple[str, bytes, int, Optional[bytes]]],
     ) -> List[str]:
         """
-        批量检查并写入
+        批量检查并写入（减少 RPC 次数，高 QPS 场景推荐）
 
         Args:
             items: [(namespace, key, expire_at_ms, metadata), ...]
@@ -119,13 +120,29 @@ class DedupClient:
         return [self._result_to_str(r.result) for r in resp.results]
 
     def exists(self, namespace: str, key: bytes) -> bool:
-        """仅检查 key 是否存在且未过期"""
+        """仅检查 key 是否存在且未过期
+
+        Args:
+            namespace: 业务命名空间
+            key: 去重键
+
+        Returns:
+            True 表示存在且未过期，False 表示不存在或已过期
+        """
         req = dedup_pb2.ExistsRequest(namespace=namespace, key=key)
         resp = self.stub.Exists(req, timeout=self.timeout)
         return resp.exists
 
     def batch_exists(self, namespace: str, keys: List[bytes]) -> List[bool]:
-        """批量检查是否存在"""
+        """批量检查是否存在
+
+        Args:
+            namespace: 业务命名空间（同一 namespace 下的多个 key）
+            keys: 去重键列表
+
+        Returns:
+            存在性列表，顺序与输入一致
+        """
         req = dedup_pb2.BatchExistsRequest(namespace=namespace, keys=keys)
         resp = self.stub.BatchExists(req, timeout=self.timeout)
         return list(resp.exists)
@@ -133,6 +150,10 @@ class DedupClient:
     def get(self, namespace: str, key: bytes) -> Optional[dict]:
         """
         获取 key 的详细信息
+
+        Args:
+            namespace: 业务命名空间
+            key: 去重键
 
         Returns:
             {
@@ -153,13 +174,29 @@ class DedupClient:
         }
 
     def delete(self, namespace: str, key: bytes) -> bool:
-        """删除 key，返回是否成功删除"""
+        """删除 key
+
+        Args:
+            namespace: 业务命名空间
+            key: 去重键
+
+        Returns:
+            True 表示成功删除，False 表示 key 不存在
+        """
         req = dedup_pb2.DeleteRequest(namespace=namespace, key=key)
         resp = self.stub.Delete(req, timeout=self.timeout)
         return resp.deleted
 
     def batch_delete(self, namespace: str, keys: List[bytes]) -> List[bool]:
-        """批量删除"""
+        """批量删除
+
+        Args:
+            namespace: 业务命名空间
+            keys: 去重键列表
+
+        Returns:
+            删除结果列表，顺序与输入一致
+        """
         req = dedup_pb2.BatchDeleteRequest(namespace=namespace, keys=keys)
         resp = self.stub.BatchDelete(req, timeout=self.timeout)
         return list(resp.deleted)
@@ -167,6 +204,9 @@ class DedupClient:
     def stats(self, namespace: str = "") -> dict:
         """
         获取服务统计信息
+
+        Args:
+            namespace: 可选，指定 namespace；留空返回全局统计
 
         Returns:
             {

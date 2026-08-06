@@ -1,21 +1,29 @@
-# Python 客户端使用说明
+# rocksdb-dedup
 
-## 安装依赖
+基于 RocksDB + 布隆过滤器的高性能持久化去重服务 Python 客户端。
+
+## 特性
+
+- 原子 `check_and_set` 操作，保证去重准确性
+- 批量操作接口，高 QPS 场景下减少 RPC 开销
+- 多租户 namespace 隔离
+- 支持过期自动清理
+- 布隆过滤器自动扩容
+- 预生成 gRPC 代码，零编译步骤，开箱即用
+
+## 安装
 
 ```bash
-pip install -r requirements.txt
+pip install rocksdb-dedup
 ```
 
-## 生成 gRPC 代码
+或从源码安装：
 
 ```bash
-cd clients/python
-python -m grpc_tools.protoc -I../../proto --python_out=. --grpc_python_out=. ../../proto/dedup.proto
+pip install clients/python
 ```
 
-生成后会得到两个文件：
-- `dedup_pb2.py` - 消息定义
-- `dedup_pb2_grpc.py` - gRPC 服务/客户端存根
+> 注意：运行时只依赖 `grpcio`，不需要安装 `grpcio-tools` 或 protoc 编译器。
 
 ## 快速开始
 
@@ -44,16 +52,6 @@ with DedupClient("localhost:50051") as client:
         print("已过期，重新抓取")
 ```
 
-## 运行示例
-
-```bash
-# 先启动服务端
-cargo run -- serve --addr 0.0.0.0:50051 --db-path ./data/dedup
-
-# 再运行 Python 示例
-python dedup_client.py
-```
-
 ## API 列表
 
 | 方法 | 说明 |
@@ -66,3 +64,94 @@ python dedup_client.py
 | `delete(namespace, key)` | 删除 key |
 | `batch_delete(namespace, keys)` | 批量删除 |
 | `stats(namespace)` | 获取服务统计 |
+
+### 批量操作示例
+
+```python
+# 批量检查并写入
+items = [
+    ("spider_news", b"https://example.com/1", expire_at, None),
+    ("spider_news", b"https://example.com/2", expire_at, b"meta2"),
+    ("spider_news", b"https://example.com/3", expire_at, None),
+]
+results = client.batch_check_and_set(items)
+# results: ["inserted", "inserted", "inserted"]
+
+# 批量检查存在性
+keys = [b"https://example.com/1", b"https://example.com/999"]
+exists_list = client.batch_exists("spider_news", keys)
+# exists_list: [True, False]
+```
+
+### 服务状态
+
+```python
+stats = client.stats()
+print(f"总 key 数: {stats['total_keys']:,}")
+print(f"布隆容量: {stats['bloom_capacity']:,}")
+print(f"误判率: {stats['bloom_fpp']:.4%}")
+print(f"QPS: {stats['qps_estimate']:,}")
+```
+
+## 配置选项
+
+### 超时设置
+
+```python
+# 全局默认超时
+client = DedupClient("localhost:50051", timeout=10.0)
+
+# 单次调用也可以通过修改 client.timeout 临时调整
+client.timeout = 30.0
+client.stats()
+```
+
+## 开发
+
+### 重新生成 gRPC 代码
+
+仅在修改了 `proto/dedup.proto` 时需要：
+
+```bash
+pip install -e ".[dev]"
+python -m grpc_tools.protoc -I../../proto --python_out=./src/dedup_client --grpc_python_out=./src/dedup_client ../../proto/dedup.proto
+```
+
+生成后需要手动将 `dedup_pb2_grpc.py` 中的绝对导入改为相对导入：
+
+```python
+# 将 import dedup_pb2 as dedup__pb2
+# 改为 from . import dedup_pb2 as dedup__pb2
+```
+
+### 运行测试
+
+```bash
+# 先启动服务端
+cargo run -- serve --addr 0.0.0.0:50051 --db-path ./data/dedup
+
+# 再运行集成测试
+python -m pytest tests/
+```
+
+## 项目结构
+
+```
+clients/python/
+├── pyproject.toml          # 打包配置
+├── README.md               # 本文档
+├── src/
+│   └── dedup_client/       # Python 包
+│       ├── __init__.py     # 导出 DedupClient
+│       ├── client.py       # 客户端实现
+│       ├── dedup_pb2.py    # 预生成的 proto 消息定义
+│       ├── dedup_pb2_grpc.py  # 预生成的 gRPC 存根
+│       └── py.typed        # PEP 561 类型标记
+└── tests/                  # 集成测试
+    ├── test_integration.py
+    └── test_restart.py
+```
+
+## License
+
+MIT
