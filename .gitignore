@@ -45,3 +45,11 @@ coverage/
 
 # 数据文件
 data/
+
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/

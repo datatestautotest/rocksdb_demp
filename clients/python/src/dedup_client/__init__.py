@@ -16,6 +16,7 @@ RocksDB 去重服务 Python 客户端库
 """
 
 from .client import DedupClient
+from .sharded import ShardedDedupClient, ConsistentHashRing
 
-__all__ = ["DedupClient"]
-__version__ = "0.1.0"
+__all__ = ["DedupClient", "ShardedDedupClient", "ConsistentHashRing"]
+__version__ = "0.2.0"
