@@ -8,7 +8,7 @@
 - **嵌入模式**：作为 Rust 库直接引入爬虫框架
 - **服务模式**：独立 gRPC 服务，支持多语言、多实例分布式调用
 
-**交付状态**：✅ 已完成，26 个单元测试 + 集成测试全部通过
+**交付状态**：✅ 已完成，33 个单元测试全部通过（含高优与中优功能升级）
 
 ---
 
@@ -32,10 +32,11 @@ rocksdb_demp/
 │   ├── error.rs            # 错误类型定义
 │   ├── key.rs              # Key/Value 编解码（大端字节序）
 │   ├── storage.rs          # RocksDB 双 CF 存储层
-│   ├── bloom.rs            # 布隆过滤器加速层（双缓冲 + 动态扩容）
-│   ├── cleaner.rs          # 过期清理后台任务（自适应限速）
-│   ├── engine.rs           # DedupEngine 主入口
-│   └── server.rs           # gRPC 服务端实现
+│   ├── bloom.rs            # 布隆过滤器加速层（Rayon 并行重建 + 分层热冷双层）
+│   ├── cleaner.rs          # 过期清理后台任务（自适应限速 + 运行期暂停/恢复）
+│   ├── engine.rs           # DedupEngine 主入口（并发批量 check/exists/delete）
+│   ├── server.rs           # gRPC 服务端实现（含优雅停机支持）
+│   └── metrics.rs          # HTTP 监控端点（Prometheus /metrics, /health, /stats）
 │
 ├── benches/
 │   └── dedup_bench.rs      # 基准测试
@@ -405,46 +406,50 @@ cargo bench
 
 ---
 
-## 12. 后续优化方向
+## 12. 优化方向与实现状态
 
-1. **布隆过滤器重建优化**：并行扫描 RocksDB，缩短大数量级下的重建时间
-2. **分层布隆过滤器**：热数据 + 冷数据多层设计，进一步降低内存和重建频率
-3. **自适应清理限速**：基于系统负载动态调整清理速度，高峰期暂停
-4. **监控告警**：集成 metrics / prometheus，监控命中率、延迟、数据积压
-5. **多线程写入优化**：使用 `WriteBatch` + 多线程流水线进一步提升写入吞吐
-6. **压缩配置**：针对爬虫 URL 数据特点，优化 RocksDB 压缩算法
-7. **服务集群化**：主从复制 / 分片模式，支持水平扩展
-8. **gRPC 流式接口**：支持流式批量操作，进一步提升高并发场景吞吐
+| 优化方向 | 状态 | 实现说明 |
+|---|---|---|
+| **布隆过滤器并行重建** | ✅ 已完成 | 基于 Rayon 多核并行计算键编码与批量填充，重建耗时大幅缩短 |
+| **分层布隆过滤器** | ✅ 已完成 | `LayeredBloomManager` 热冷双层设计，热层快速插入，冷层后台定期无缝原子切换 |
+| **多线程并发批量操作** | ✅ 已完成 | `batch_check_and_set`、`batch_exists`、`batch_delete` 均基于 Rayon 实现多核并行 |
+| **监控与健康检查** | ✅ 已完成 | 独立 HTTP 运维端口（默认 9090），暴露 `/metrics` (Prometheus)、`/health`、`/stats` |
+| **清理器运行期控制** | ✅ 已完成 | 支持 `pause` / `resume` 动态挂起后台清理任务，将 100% 磁盘 IO 保障给爬虫写入高峰 |
+| **RocksDB 存储与分层压缩** | ✅ 已完成 | 共享 Block Cache；上层启用 LZ4 低延迟压缩，底层启用 ZSTD 极限高压缩比，专优爬虫 URL |
+| **分布式分片集群客户端** | ✅ 已完成 | `ShardedDedupClient` 基于 160 虚拟节点一致性哈希环，自动拆分批量请求并发处理并保序重组 |
+| **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`check` 离线诊断 Key |
 
 ---
 
-## 13. 验证命令
+## 13. 常用运维与验证命令
 
 ```bash
-# 编译检查
+# 1. 编译检查与全套测试（含 33 个核心单元测试）
 cargo check
+cargo test
 
-# 单元测试
-cargo test --lib
-
-# 运行演示
+# 2. 运行单机演示
 cargo run -- demo
 
-# 启动 gRPC 服务
-cargo run -- serve --addr 0.0.0.0:50051
+# 3. 启动去重服务（gRPC :50051 + HTTP 监控 :9090）
+cargo run -- serve --addr 0.0.0.0:50051 --metrics-addr 0.0.0.0:9090 --block-cache-mb 512
 
-# 基准测试
-cargo bench
+# 4. 查看当前服务运行状态仪表盘
+cargo run -- status --addr 127.0.0.1:9090
 
-# 集成测试
-# 终端 1: 启动服务
-cargo run -- serve --addr 127.0.0.1:50051 --db-path ./data/test_dedup --bloom-capacity 10000
-# 终端 2: 运行测试
+# 5. 爬虫高峰期暂停/恢复后台清理
+cargo run -- pause-cleaner --addr 127.0.0.1:9090
+cargo run -- resume-cleaner --addr 127.0.0.1:9090
+
+# 6. 离线诊断指定 Key 状态与元数据
+cargo run -- check --db-path ./data/dedup --namespace crawler --key "https://example.com/test"
+
+# 7. 运行 Python 客户端与分片测试
 cd clients/python
-python integration_test.py all
+python -m unittest tests/test_sharded.py
 ```
 
 ---
 
-*文档生成时间：2026-07-27*
-*项目版本：v0.1.0*
+*文档更新时间：2026-10-16*
+*项目版本：v0.2.0*
