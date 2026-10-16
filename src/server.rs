@@ -143,15 +143,12 @@ impl DedupService for DedupServiceImpl {
         request: Request<pb::BatchExistsRequest>,
     ) -> Result<Response<pb::BatchExistsResponse>, Status> {
         let req = request.into_inner();
-        let ns = req.namespace;
+        let key_slices: Vec<&[u8]> = req.keys.iter().map(|k| k.as_slice()).collect();
+        let exists = self
+            .engine
+            .batch_exists(req.namespace.as_bytes(), &key_slices)?;
 
-        let mut exists_list = Vec::with_capacity(req.keys.len());
-        for key in &req.keys {
-            let e = self.engine.exists(ns.as_bytes(), key)?;
-            exists_list.push(e);
-        }
-
-        Ok(Response::new(pb::BatchExistsResponse { exists: exists_list }))
+        Ok(Response::new(pb::BatchExistsResponse { exists }))
     }
 
     async fn get(
@@ -190,16 +187,13 @@ impl DedupService for DedupServiceImpl {
         request: Request<pb::BatchDeleteRequest>,
     ) -> Result<Response<pb::BatchDeleteResponse>, Status> {
         let req = request.into_inner();
-        let ns = req.namespace;
-
-        let mut deleted_list = Vec::with_capacity(req.keys.len());
-        for key in &req.keys {
-            let d = self.engine.delete(ns.as_bytes(), key)?;
-            deleted_list.push(d);
-        }
+        let key_slices: Vec<&[u8]> = req.keys.iter().map(|k| k.as_slice()).collect();
+        let deleted = self
+            .engine
+            .batch_delete(req.namespace.as_bytes(), &key_slices)?;
 
         Ok(Response::new(pb::BatchDeleteResponse {
-            deleted: deleted_list,
+            deleted,
         }))
     }
 
@@ -231,19 +225,31 @@ impl DedupService for DedupServiceImpl {
     }
 }
 
-/// 启动 gRPC 服务
-pub async fn serve(
+/// 启动 gRPC 服务（带优雅关闭信号监听）
+pub async fn serve_with_shutdown<F>(
     engine: Arc<DedupEngine>,
     addr: std::net::SocketAddr,
-) -> anyhow::Result<()> {
+    signal: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
     let svc = DedupServiceImpl::new(engine);
 
     println!("[grpc] 去重服务启动，监听 {}", addr);
 
     tonic::transport::Server::builder()
         .add_service(DedupServiceServer::new(svc))
-        .serve(addr)
+        .serve_with_shutdown(addr, signal)
         .await?;
 
     Ok(())
+}
+
+/// 启动 gRPC 服务（默认持续运行，保留向后兼容）
+pub async fn serve(
+    engine: Arc<DedupEngine>,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    serve_with_shutdown(engine, addr, std::future::pending()).await
 }
