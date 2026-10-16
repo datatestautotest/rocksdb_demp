@@ -34,6 +34,8 @@ pub struct CleanerStats {
     pub current_speed: f64,
     /// 当前批次大小
     pub current_batch_size: usize,
+    /// 是否处于暂停状态
+    pub is_paused: bool,
 }
 
 /// 共享的清理器状态（后台任务与外部通过 Arc 共享）
@@ -45,6 +47,7 @@ struct CleanerState {
     backlog_estimate: AtomicU64,
     current_speed: AtomicU64, // 存 f64 的位表示
     current_batch_size: AtomicU64,
+    paused: AtomicBool,
 }
 
 impl CleanerState {
@@ -109,6 +112,11 @@ impl ExpiryCleaner {
                     _ = interval.tick() => {
                         if !running_clone.load(Ordering::SeqCst) {
                             break;
+                        }
+
+                        // 如果处于暂停状态，跳过本轮清理（用于业务高峰期节省磁盘 IO）
+                        if state.paused.load(Ordering::Relaxed) {
+                            continue;
                         }
 
                         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
@@ -209,6 +217,21 @@ impl ExpiryCleaner {
         Ok(total)
     }
 
+    /// 暂停后台清理（用于业务高峰期节省磁盘 IO）
+    pub fn pause(&self) {
+        self.state.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// 恢复后台清理
+    pub fn resume(&self) {
+        self.state.paused.store(false, Ordering::SeqCst);
+    }
+
+    /// 是否处于暂停状态
+    pub fn is_paused(&self) -> bool {
+        self.state.paused.load(Ordering::SeqCst)
+    }
+
     /// 获取统计信息
     pub fn stats(&self) -> CleanerStats {
         CleanerStats {
@@ -218,6 +241,7 @@ impl ExpiryCleaner {
             backlog_estimate: self.state.backlog_estimate.load(Ordering::Relaxed),
             current_speed: self.state.get_speed(),
             current_batch_size: self.state.current_batch_size.load(Ordering::Relaxed) as usize,
+            is_paused: self.state.paused.load(Ordering::Relaxed),
         }
     }
 

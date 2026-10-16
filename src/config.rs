@@ -34,6 +34,15 @@ pub struct DedupConfig {
 
     /// 单条 Value 中 metadata 的最大字节数
     pub max_metadata_size: usize,
+
+    /// RocksDB Block Cache 缓存大小（MB），默认 256MB
+    pub block_cache_size_mb: usize,
+
+    /// 是否开启 LSM-Tree 分层压缩（LZ4 + 底层 ZSTD）
+    pub enable_compression: bool,
+
+    /// 数据块大小（KB），默认 16KB（适合随机点查）
+    pub block_size_kb: usize,
 }
 
 impl Default for DedupConfig {
@@ -50,6 +59,9 @@ impl Default for DedupConfig {
             cleaner_batch_size: 10_000,
             cleaner_batch_sleep_ms: 10,
             max_metadata_size: 1024,
+            block_cache_size_mb: 256,
+            enable_compression: true,
+            block_size_kb: 16,
         }
     }
 }
@@ -68,6 +80,9 @@ impl DedupConfig {
             cleaner_batch_size: 100,
             cleaner_batch_sleep_ms: 1,
             max_metadata_size: 256,
+            block_cache_size_mb: 16,
+            enable_compression: false,
+            block_size_kb: 4,
         }
     }
 }

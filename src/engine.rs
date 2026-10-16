@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rayon::prelude::*;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -388,18 +389,68 @@ impl DedupEngine {
         }
     }
 
-    /// 批量查重并写入（提高吞吐）
+    /// 批量查重并写入（并行版本，使用 rayon 并发执行）
     ///
-    /// 返回与输入等长的结果向量
+    /// 相比旧版串行 for 循环：
+    /// - 各条目独立查重，无依赖关系，天然适合并行
+    /// - rayon 自动分配线程，利用多核 CPU
+    /// - 适合单批 >= 100 条的场景，小批量串行仍然高效
+    ///
+    /// 注意：结果顺序与输入顺序一致（rayon 保证 par_iter 的输出顺序）。
+    ///
+    /// # 参数
+    /// 元组列表：`(namespace, key, expire_at_ms, metadata)`
     pub fn batch_check_and_set(
         &self,
         items: &[(&[u8], &[u8], u64, Option<Vec<u8>>)],
     ) -> Result<Vec<CheckResult>> {
-        let mut results = Vec::with_capacity(items.len());
-        for (ns, key, expire_at, meta) in items {
-            results.push(self.check_and_set(ns, key, *expire_at, meta.clone())?);
+        // 小批量（< 32 条）走串行，避免 rayon 调度开销
+        if items.len() < 32 {
+            return items
+                .iter()
+                .map(|(ns, key, expire_at, meta)| {
+                    self.check_and_set(ns, key, *expire_at, meta.clone())
+                })
+                .collect();
         }
-        Ok(results)
+
+        // 大批量：rayon 并行
+        // 注意：DedupEngine 实现了 Sync（Arc<BloomManager>、DedupStore(Arc<DB>) 均 Sync），
+        // 因此可以安全地跨线程引用 &self。
+        items
+            .par_iter()
+            .map(|(ns, key, expire_at, meta)| {
+                self.check_and_set(ns, key, *expire_at, meta.clone())
+            })
+            .collect()
+    }
+
+    /// 批量检查是否存在（并行版本，使用 rayon 并发执行）
+    ///
+    /// # 参数
+    /// - `namespace`: 命名空间
+    /// - `keys`: 待查 key 列表
+    pub fn batch_exists(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<Vec<bool>> {
+        if keys.len() < 32 {
+            return keys.iter().map(|k| self.exists(namespace, k)).collect();
+        }
+
+        keys.par_iter()
+            .map(|k| self.exists(namespace, k))
+            .collect()
+    }
+
+    /// 批量删除指定 Key（并行版本，使用 rayon 并发执行）
+    ///
+    /// 返回布尔向量，指示每个 key 是否成功删除（之前存在且未过期）。
+    pub fn batch_delete(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<Vec<bool>> {
+        if keys.len() < 32 {
+            return keys.iter().map(|k| self.delete(namespace, k)).collect();
+        }
+
+        keys.par_iter()
+            .map(|k| self.delete(namespace, k))
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -434,6 +485,21 @@ impl DedupEngine {
         self.cleaner.clean_all_sync(now_ms)
     }
 
+    /// 暂停后台过期清理（在爬虫流量高峰期减少磁盘 IO 开销）
+    pub fn pause_cleaner(&self) {
+        self.cleaner.pause();
+    }
+
+    /// 恢复后台过期清理
+    pub fn resume_cleaner(&self) {
+        self.cleaner.resume();
+    }
+
+    /// 查询后台清理是否处于暂停状态
+    pub fn is_cleaner_paused(&self) -> bool {
+        self.cleaner.is_paused()
+    }
+
     // -----------------------------------------------------------------------
     // 生命周期
     // -----------------------------------------------------------------------
@@ -462,6 +528,13 @@ impl DedupEngine {
         // 刷写 RocksDB
         self.store.db().flush_wal(true)?;
 
+        Ok(())
+    }
+
+    /// 强制落盘（flush WAL 及 memtable 到 SST）
+    pub fn flush(&self) -> Result<()> {
+        self.store.db().flush_wal(true)?;
+        self.store.db().flush()?;
         Ok(())
     }
 
@@ -663,5 +736,55 @@ mod tests {
         let engine2 = DedupEngine::open(config).await.unwrap();
         assert!(engine2.exists(ns, key).unwrap());
         engine2.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_batch_exists_and_delete() {
+        let (engine, _dir) = setup_engine().await;
+        let ns = b"batch_ops";
+        let expire_at = chrono::Utc::now().timestamp_millis() as u64 + 3600_000;
+
+        // 插入 50 个 key
+        let mut keys_raw = Vec::new();
+        for i in 0..50 {
+            keys_raw.push(format!("k_{}", i));
+        }
+        for k in &keys_raw {
+            engine.check_and_set(ns, k.as_bytes(), expire_at, None).unwrap();
+        }
+
+        // 批量检查存在性
+        let keys_slices: Vec<&[u8]> = keys_raw.iter().map(|s| s.as_bytes()).collect();
+        let exists = engine.batch_exists(ns, &keys_slices).unwrap();
+        assert_eq!(exists.len(), 50);
+        assert!(exists.iter().all(|&e| e));
+
+        // 批量删除前 25 个
+        let del_slices = &keys_slices[0..25];
+        let deleted = engine.batch_delete(ns, del_slices).unwrap();
+        assert_eq!(deleted.len(), 25);
+        assert!(deleted.iter().all(|&d| d));
+
+        // 再次检查
+        let exists2 = engine.batch_exists(ns, &keys_slices).unwrap();
+        for i in 0..25 {
+            assert!(!exists2[i], "key {} should be deleted", i);
+        }
+        for i in 25..50 {
+            assert!(exists2[i], "key {} should still exist", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleaner_pause_resume() {
+        let (engine, _dir) = setup_engine().await;
+        assert!(!engine.is_cleaner_paused());
+        engine.pause_cleaner();
+        assert!(engine.is_cleaner_paused());
+        assert!(engine.cleaner_stats().is_paused);
+
+        engine.resume_cleaner();
+        assert!(!engine.is_cleaner_paused());
+        assert!(!engine.cleaner_stats().is_paused);
     }
 }

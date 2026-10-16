@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rocksdb::{
-    BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBIterator, IteratorMode, Options,
-    WriteBatch, DB,
+    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DBCompressionType,
+    DBIterator, IteratorMode, Options, WriteBatch, DB,
 };
 
 use crate::config::DedupConfig;
@@ -53,10 +53,12 @@ impl DedupStore {
         // 开启并行 compaction
         db_opts.set_max_background_jobs(4);
         db_opts.increase_parallelism(4);
-        // 优化读性能：布隆过滤器在 cf 级别设置
 
-        let cf_dedup = ColumnFamilyDescriptor::new(CF_DEDUP, Self::dedup_cf_options());
-        let cf_expire = ColumnFamilyDescriptor::new(CF_EXPIRE, Self::expire_cf_options());
+        // 共享 Block Cache
+        let cache = Cache::new_lru_cache(config.block_cache_size_mb.max(8) << 20);
+
+        let cf_dedup = ColumnFamilyDescriptor::new(CF_DEDUP, Self::dedup_cf_options(config, &cache));
+        let cf_expire = ColumnFamilyDescriptor::new(CF_EXPIRE, Self::expire_cf_options(config, &cache));
 
         let db = DB::open_cf_descriptors(&db_opts, path, vec![cf_dedup, cf_expire])?;
 
@@ -64,25 +66,45 @@ impl DedupStore {
     }
 
     /// cf_dedup 的选项
-    fn dedup_cf_options() -> Options {
+    fn dedup_cf_options(config: &DedupConfig, cache: &Cache) -> Options {
         let mut opts = Options::default();
         // 前缀布隆过滤器：加速 point lookup
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(DEDUP_KEY_LEN));
         opts.set_memtable_prefix_bloom_ratio(0.1);
+
+        // 分层压缩：上层 LZ4 低延迟，底层 ZSTD 高压缩比（适合爬虫高重复文本与 URL）
+        if config.enable_compression {
+            opts.set_compression_type(DBCompressionType::Lz4);
+            opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+        } else {
+            opts.set_compression_type(DBCompressionType::None);
+        }
+
         // LSM 每层也加布隆过滤器（通过 BlockBasedOptions）
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.block_size_kb * 1024);
         opts.set_block_based_table_factory(&block_opts);
         opts.set_level_compaction_dynamic_level_bytes(true);
         opts
     }
 
     /// cf_expire 的选项
-    fn expire_cf_options() -> Options {
+    fn expire_cf_options(config: &DedupConfig, cache: &Cache) -> Options {
         let mut opts = Options::default();
+        if config.enable_compression {
+            opts.set_compression_type(DBCompressionType::Lz4);
+            opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+        } else {
+            opts.set_compression_type(DBCompressionType::None);
+        }
+
         // 过期索引主要是范围扫描，但保留 point lookup 能力（删除时用）
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.block_size_kb * 1024);
         opts.set_block_based_table_factory(&block_opts);
         opts.set_level_compaction_dynamic_level_bytes(true);
         opts
@@ -254,6 +276,26 @@ impl DedupStore {
     /// 统计 cf_dedup 中未过期的 Key 数量（近似，用于监控）
     pub fn count_valid_keys(&self, now_ms: u64) -> Result<usize> {
         self.for_each_valid_key(now_ms, |_, _| true)
+    }
+
+    /// 一次性收集所有未过期 Key 到 Vec，供并行重建布隆过滤器使用
+    ///
+    /// 相比 `for_each_valid_key` 的逐条回调，此方法把数据全量收集后
+    /// 可交给 rayon 并行插入布隆过滤器，显著缩短大数据量下的重建时间。
+    pub fn collect_valid_keys(&self, now_ms: u64) -> Result<Vec<(u64, u128)>> {
+        let cf = self.cf_dedup();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let mut keys = Vec::new();
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+            let (ns_hash, key_hash) = crate::key::parse_dedup_key(&key_bytes)?;
+            let value = DedupValue::decode(&value_bytes)?;
+            if !value.is_expired(now_ms) {
+                keys.push((ns_hash, key_hash));
+            }
+        }
+        Ok(keys)
     }
 
     /// 统计 cf_dedup 中所有 Key 数量（包括过期的，用于测试）

@@ -14,9 +14,12 @@ pub mod storage;
 pub mod cleaner;
 pub mod engine;
 pub mod server;
+pub mod metrics;
 
 pub use config::DedupConfig;
-pub use engine::DedupEngine;
+pub use engine::{CheckResult, DedupEngine};
 pub use error::DedupError;
 pub use key::{DedupValue, NamespaceId};
-pub use server::{serve, DedupServiceServer, DedupServiceImpl};
+pub use bloom::{BloomStats, LayeredBloomManager, LayeredBloomStats};
+pub use server::{serve, serve_with_shutdown, DedupServiceServer, DedupServiceImpl};
+pub use metrics::{create_metrics_router, serve_metrics};

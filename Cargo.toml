@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["full"] }
 # gRPC
 tonic = "0.12"
 prost = "0.13"
+axum = "0.7"
 
 # Hash 函数（高性能，用于 key/namespace 哈希）
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
@@ -48,6 +49,9 @@ metrics = "0.22"
 
 # 命令行参数
 clap = { version = "4", features = ["derive"] }
+
+# 并行计算（布隆过滤器并行重建）
+rayon = "1.10"
 
 [dev-dependencies]
 tempfile = "3"
