@@ -10,77 +10,155 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary_name: rocksdb-dedup
-            archive_name: rocksdb-dedup-linux-x86_64.tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: rocksdb-dedup.exe
-            archive_name: rocksdb-dedup-windows-x86_64.zip
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            binary_name: rocksdb-dedup
-            archive_name: rocksdb-dedup-macos-arm64.tar.gz
-
+  build-linux-gnu:
+    name: Build Linux GNU (x86_64 glibc-compatible)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+      - name: Build in Ubuntu 20.04 Container (GLIBC 2.31 + Static libstdc++)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev build-essential
+          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
+            ubuntu:20.04 bash -c "
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                curl git ca-certificates build-essential clang libclang-dev pkg-config libssl-dev
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              source \$HOME/.cargo/env
+              RUSTFLAGS='-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc' cargo build --release --bin rocksdb-dedup
+              chmod -R a+rwx target/
+            "
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }} --bin rocksdb-dedup
-
-      - name: Package Release Assets (Linux & macOS)
-        if: runner.os != 'Windows'
+      - name: Package Release Assets (Linux GNU)
         run: |
-          mkdir -p package
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} package/
-          cp dedup.example.toml package/
-          cp DELIVERY.md package/
-          mkdir -p package/grafana
-          cp grafana/rocksdb_dedup_dashboard.json package/grafana/
-          tar -czvf ${{ matrix.archive_name }} -C package .
-
-      - name: Package Release Assets (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path package
-          Copy-Item target/${{ matrix.target }}/release/${{ matrix.binary_name }} package/
-          Copy-Item dedup.example.toml package/
-          Copy-Item DELIVERY.md package/
-          New-Item -ItemType Directory -Force -Path package/grafana
-          Copy-Item grafana/rocksdb_dedup_dashboard.json package/grafana/
-          Compress-Archive -Path package/* -DestinationPath ${{ matrix.archive_name }}
+          mkdir -p package-gnu
+          cp target/release/rocksdb-dedup package-gnu/
+          cp dedup.example.toml package-gnu/
+          cp DELIVERY.md package-gnu/
+          mkdir -p package-gnu/grafana
+          cp grafana/rocksdb_dedup_dashboard.json package-gnu/grafana/
+          tar -czvf rocksdb-dedup-linux-x86_64.tar.gz -C package-gnu .
 
       - name: Upload Artifact to GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ matrix.archive_name }}
+          files: rocksdb-dedup-linux-x86_64.tar.gz
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-linux-musl:
+    name: Build Linux Musl (x86_64 fully-static)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build in Alpine Musl Container
+        run: |
+          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
+            rust:alpine sh -c "
+              apk update && apk add --no-cache \
+                build-base clang llvm git protobuf protobuf-dev gcompat linux-headers perl
+              RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-musl --bin rocksdb-dedup
+              chmod -R a+rwx target/
+            "
+
+      - name: Package Release Assets (Linux Musl)
+        run: |
+          mkdir -p package-musl
+          cp target/x86_64-unknown-linux-musl/release/rocksdb-dedup package-musl/
+          cp dedup.example.toml package-musl/
+          cp DELIVERY.md package-musl/
+          mkdir -p package-musl/grafana
+          cp grafana/rocksdb_dedup_dashboard.json package-musl/grafana/
+          tar -czvf rocksdb-dedup-linux-x86_64-musl.tar.gz -C package-musl .
+
+      - name: Upload Artifact to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: rocksdb-dedup-linux-x86_64-musl.tar.gz
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-windows:
+    name: Build Windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: windows-msvc
+
+      - name: Build Release Binary
+        run: cargo build --release --target x86_64-pc-windows-msvc --bin rocksdb-dedup
+
+      - name: Package Release Assets (Windows)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package-win
+          Copy-Item target/x86_64-pc-windows-msvc/release/rocksdb-dedup.exe package-win/
+          Copy-Item dedup.example.toml package-win/
+          Copy-Item DELIVERY.md package-win/
+          New-Item -ItemType Directory -Force -Path package-win/grafana
+          Copy-Item grafana/rocksdb_dedup_dashboard.json package-win/grafana/
+          Compress-Archive -Path package-win/* -DestinationPath rocksdb-dedup-windows-x86_64.zip
+
+      - name: Upload Artifact to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: rocksdb-dedup-windows-x86_64.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-macos:
+    name: Build macOS (aarch64-apple-darwin)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: macos-arm64
+
+      - name: Build Release Binary
+        run: cargo build --release --target aarch64-apple-darwin --bin rocksdb-dedup
+
+      - name: Package Release Assets (macOS)
+        run: |
+          mkdir -p package-mac
+          cp target/aarch64-apple-darwin/release/rocksdb-dedup package-mac/
+          cp dedup.example.toml package-mac/
+          cp DELIVERY.md package-mac/
+          mkdir -p package-mac/grafana
+          cp grafana/rocksdb_dedup_dashboard.json package-mac/grafana/
+          tar -czvf rocksdb-dedup-macos-arm64.tar.gz -C package-mac .
+
+      - name: Upload Artifact to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: rocksdb-dedup-macos-arm64.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: false

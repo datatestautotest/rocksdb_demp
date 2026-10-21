@@ -432,10 +432,24 @@ cargo bench
 | **自动化 E2E 全链路集成测试** | ✅ 已完成 | `tests/run_e2e.py` 自动拉起服务、探针检测、业务与运维全链路压测验证、优雅退出清理 |
 | **Grafana 官方仪表板模板** | ✅ 已完成 | 提供 `grafana/rocksdb_dedup_dashboard.json` 模板，导入即可呈现核心指标大盘 |
 | **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`compact`、`check` 离线诊断 Key |
+| **跨平台 Release CI 兼容体系** | ✅ 已完成 | 自动化构建发布 Windows (`.zip`)、Linux Musl（纯静态零依赖）、Linux GNU（兼容 glibc >= 2.31）与 macOS |
 
 ---
 
-## 13. 常用运维与验证命令
+## 13. GitHub Release 预编译包选择指南
+
+GitHub Releases 页面针对不同操作系统架构提供多种预编译包：
+
+| 安装包名称 | 运行平台 | 依赖说明 | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| `rocksdb-dedup-linux-x86_64-musl.tar.gz` | **所有 64 位 Linux** | **零动态依赖**（完全静态编译，不依赖宿主机 glibc / libstdc++） | **强烈推荐**。CentOS 7/8/9、Ubuntu 18.04/20.04/22.04/24.04、Debian、Alpine、Docker 等任何 Linux 环境 |
+| `rocksdb-dedup-linux-x86_64.tar.gz` | Linux x86_64 | 兼容标准 glibc >= 2.31（静态内嵌 libstdc++ / libgcc） | Ubuntu 20.04+、Debian 11+、Rocky Linux 8+ 等标准 glibc 发行版 |
+| `rocksdb-dedup-windows-x86_64.zip` | Windows x86_64 | Windows 10/11 / Windows Server 2016+ | Windows 生产或本地开发调试 |
+| `rocksdb-dedup-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 12+ (M1/M2/M3/M4) | Mac 开发工作站 |
+
+---
+
+## 14. 常用运维与验证命令
 
 ```bash
 # 1. 编译检查与全套核心测试（36 个 Rust 单元测试全部通过）
@@ -475,5 +489,6 @@ python tests/run_e2e.py
 ---
 
 *文档更新时间：2026-10-21*
-*项目版本：v0.2.1*
+*项目版本：v0.2.2*
+
 

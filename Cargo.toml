@@ -1,6 +1,6 @@
 [package]
 name = "rocksdb-dedup"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "基于RocksDB与布隆过滤器的高并发持久化去重引擎，用于爬虫场景"
 
