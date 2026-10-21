@@ -332,6 +332,17 @@ impl DedupStore {
             .unwrap_or(Some(0))
             .unwrap_or(0)
     }
+
+    /// 触发指定范围的 RocksDB Compaction，回收删除标记（Tombstone）并释放物理磁盘
+    pub fn compact_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) {
+        self.db.compact_range_cf(self.cf_dedup(), start, end);
+        self.db.compact_range_cf(self.cf_expire(), start, end);
+    }
+
+    /// 对所有 Column Family 触发全量 Compaction，清理已删除历史墓碑与磁盘碎片
+    pub fn compact_all(&self) {
+        self.compact_range(None, None);
+    }
 }
 
 /// cf_expire 迭代器封装
@@ -474,5 +485,25 @@ mod tests {
         // 剩余应该是 6 条
         let remaining = store.count_all_keys().unwrap();
         assert_eq!(remaining, 6);
+    }
+
+    #[test]
+    fn test_compact_all() {
+        let (store, _dir) = setup();
+        let ns = crate::key::hash_namespace(b"test_compact");
+        for i in 0..10u128 {
+            let kh = crate::key::hash_key(&i.to_be_bytes());
+            let v = DedupValue {
+                expire_at_ms: i as u64 * 1000,
+                created_at_ms: 0,
+                original_key: i.to_be_bytes().to_vec(),
+                metadata: vec![],
+            };
+            store.put(ns, kh, &v).unwrap();
+        }
+        let _ = store.delete_expired_batch(5000, 100).unwrap();
+        // 触发全量 compaction 验证不会 panic 且数据一致
+        store.compact_all();
+        assert_eq!(store.count_all_keys().unwrap(), 4);
     }
 }

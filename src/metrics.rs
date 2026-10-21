@@ -35,6 +35,7 @@ pub fn create_metrics_router(engine: Arc<DedupEngine>) -> Router {
         .route("/stats", get(stats_handler))
         .route("/cleaner/pause", post(cleaner_pause_handler))
         .route("/cleaner/resume", post(cleaner_resume_handler))
+        .route("/compact", post(compact_handler))
         .with_state(state)
 }
 
@@ -113,6 +114,10 @@ pub async fn prometheus_metrics_handler(State(state): State<MetricsServerState>)
     out.push_str("# TYPE rocksdb_dedup_cleaner_paused gauge\n");
     out.push_str(&format!("rocksdb_dedup_cleaner_paused {}\n", if cleaner.is_paused { 1 } else { 0 }));
 
+    out.push_str("# HELP rocksdb_dedup_cleaner_compacts_total Total count of RocksDB compactions executed.\n");
+    out.push_str("# TYPE rocksdb_dedup_cleaner_compacts_total counter\n");
+    out.push_str(&format!("rocksdb_dedup_cleaner_compacts_total {}\n", cleaner.total_compacts));
+
     // RocksDB 存储指标
     out.push_str("# HELP rocksdb_dedup_rocksdb_estimated_keys Total estimated keys in RocksDB cf_dedup.\n");
     out.push_str("# TYPE rocksdb_dedup_rocksdb_estimated_keys gauge\n");
@@ -149,6 +154,7 @@ pub async fn stats_handler(State(state): State<MetricsServerState>) -> (StatusCo
             "current_batch_size": cleaner.current_batch_size,
             "run_count": cleaner.run_count,
             "is_paused": cleaner.is_paused,
+            "total_compacts": cleaner.total_compacts,
         }
     });
 
@@ -165,6 +171,22 @@ pub async fn cleaner_pause_handler(State(state): State<MetricsServerState>) -> (
 pub async fn cleaner_resume_handler(State(state): State<MetricsServerState>) -> (StatusCode, Json<serde_json::Value>) {
     state.engine.resume_cleaner();
     (StatusCode::OK, Json(json!({"status": "cleaner resumed"})))
+}
+
+/// 手动触发 RocksDB Compaction
+pub async fn compact_handler(State(state): State<MetricsServerState>) -> (StatusCode, Json<serde_json::Value>) {
+    let engine = state.engine.clone();
+    tokio::task::spawn_blocking(move || {
+        engine.compact();
+    })
+    .await
+    .ok();
+
+    (StatusCode::OK, Json(json!({
+        "status": "COMPACTED",
+        "message": "RocksDB manual compaction triggered successfully",
+        "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+    })))
 }
 
 /// 启动 HTTP 监控服务（带优雅关闭监听）

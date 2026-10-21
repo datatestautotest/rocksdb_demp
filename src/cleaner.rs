@@ -36,6 +36,8 @@ pub struct CleanerStats {
     pub current_batch_size: usize,
     /// 是否处于暂停状态
     pub is_paused: bool,
+    /// 累计触发 Compaction 物理整理次数
+    pub total_compacts: u64,
 }
 
 /// 共享的清理器状态（后台任务与外部通过 Arc 共享）
@@ -48,6 +50,8 @@ struct CleanerState {
     current_speed: AtomicU64, // 存 f64 的位表示
     current_batch_size: AtomicU64,
     paused: AtomicBool,
+    deleted_since_compact: AtomicU64,
+    total_compacts: AtomicU64,
 }
 
 impl CleanerState {
@@ -166,7 +170,20 @@ impl ExpiryCleaner {
                             }
                         }
 
-                        // 4. 计算本轮速度
+                        // 4. 检查是否达到自动 Compaction 阈值（回收 Tombstone 墓碑与磁盘碎片）
+                        if config.cleaner_compact_threshold > 0 && round_deleted > 0 {
+                            let prev = state.deleted_since_compact.fetch_add(round_deleted, Ordering::Relaxed);
+                            if prev + round_deleted >= config.cleaner_compact_threshold {
+                                state.deleted_since_compact.store(0, Ordering::Relaxed);
+                                let store_compact = store.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    store_compact.compact_all();
+                                });
+                                state.total_compacts.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        // 5. 计算本轮速度
                         let elapsed = round_start.elapsed().as_secs_f64();
                         let speed = if elapsed > 0.0 {
                             round_deleted as f64 / elapsed
@@ -214,7 +231,18 @@ impl ExpiryCleaner {
             .total_deleted
             .fetch_add(total, Ordering::Relaxed);
         self.state.run_count.fetch_add(1, Ordering::Relaxed);
+
+        if self.config.cleaner_compact_threshold > 0 && total >= self.config.cleaner_compact_threshold {
+            self.compact();
+        }
+
         Ok(total)
+    }
+
+    /// 手动对底层的 RocksDB 执行 Compaction 物理碎片整理
+    pub fn compact(&self) {
+        self.store.compact_all();
+        self.state.total_compacts.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 暂停后台清理（用于业务高峰期节省磁盘 IO）
@@ -242,6 +270,7 @@ impl ExpiryCleaner {
             current_speed: self.state.get_speed(),
             current_batch_size: self.state.current_batch_size.load(Ordering::Relaxed) as usize,
             is_paused: self.state.paused.load(Ordering::Relaxed),
+            total_compacts: self.state.total_compacts.load(Ordering::Relaxed),
         }
     }
 

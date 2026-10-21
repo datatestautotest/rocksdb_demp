@@ -31,6 +31,10 @@ enum Commands {
     },
     /// 启动 gRPC 服务与 HTTP 运维监控服务
     Serve {
+        /// 配置文件路径（TOML 格式），指定时优先从文件读取配置
+        #[arg(short, long)]
+        config: Option<String>,
+
         /// gRPC 监听地址
         #[arg(long, default_value = "0.0.0.0:50051")]
         addr: String,
@@ -81,6 +85,12 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:9090")]
         addr: String,
     },
+    /// 触发指定服务实例的 RocksDB 物理 Compaction 整理
+    Compact {
+        /// 目标 HTTP 监控地址（如 127.0.0.1:9090）
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        addr: String,
+    },
     /// 诊断/检查单条 Key 是否存在并显示元数据
     Check {
         /// 数据目录
@@ -106,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     }) {
         Commands::Demo { db_path } => run_demo(db_path).await,
         Commands::Serve {
+            config,
             addr,
             metrics_addr,
             db_path,
@@ -116,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             enable_compression,
         } => {
             run_serve(
+                config,
                 addr,
                 metrics_addr,
                 db_path,
@@ -130,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status { addr } => run_status(&addr).await,
         Commands::PauseCleaner { addr } => run_pause_cleaner(&addr).await,
         Commands::ResumeCleaner { addr } => run_resume_cleaner(&addr).await,
+        Commands::Compact { addr } => run_compact(&addr).await,
         Commands::Check {
             db_path,
             namespace,
@@ -139,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_serve(
+    config_file: Option<String>,
     addr: String,
     metrics_addr: String,
     db_path: String,
@@ -148,20 +162,26 @@ async fn run_serve(
     block_cache_mb: usize,
     enable_compression: bool,
 ) -> anyhow::Result<()> {
-    let config = DedupConfig {
-        db_path,
-        bloom_capacity,
-        bloom_false_positive_rate: bloom_fpp,
-        bloom_rebuild_interval_secs: 3600,
-        bloom_expand_threshold: 0.8,
-        bloom_expand_factor: 1.5,
-        cleaner_interval_secs: 60,
-        cleaner_batch_size,
-        cleaner_batch_sleep_ms: 5,
-        max_metadata_size: 4096,
-        block_cache_size_mb: block_cache_mb,
-        enable_compression,
-        block_size_kb: 16,
+    let config = if let Some(ref path) = config_file {
+        println!("正在从配置文件加载: {}", path);
+        DedupConfig::from_file(path)?
+    } else {
+        DedupConfig {
+            db_path,
+            bloom_capacity,
+            bloom_false_positive_rate: bloom_fpp,
+            bloom_rebuild_interval_secs: 3600,
+            bloom_expand_threshold: 0.8,
+            bloom_expand_factor: 1.5,
+            cleaner_interval_secs: 60,
+            cleaner_batch_size,
+            cleaner_batch_sleep_ms: 5,
+            max_metadata_size: 4096,
+            block_cache_size_mb: block_cache_mb,
+            enable_compression,
+            block_size_kb: 16,
+            cleaner_compact_threshold: 100_000,
+        }
     };
 
     println!("=== RocksDB 去重服务启动 ===");
@@ -170,6 +190,7 @@ async fn run_serve(
     println!("误判率:       {}", config.bloom_false_positive_rate);
     println!("Block Cache:  {} MB", config.block_cache_size_mb);
     println!("分层压缩:     {}", if config.enable_compression { "开启 (LZ4 + ZSTD)" } else { "关闭" });
+    println!("自动 Compaction: 每删除 {} 条触发", config.cleaner_compact_threshold);
     println!("gRPC 监听:    {}", addr);
     println!("HTTP 监控:    http://{}", metrics_addr);
 
@@ -192,18 +213,30 @@ async fn run_serve(
         }
     });
 
+    let shutdown_tx_for_err = shutdown_tx.clone();
     let grpc_engine = engine.clone();
     let grpc_handle = tokio::spawn(async move {
         let mut rx = shutdown_rx_grpc;
         let signal = async move {
             let _ = rx.changed().await;
         };
-        rocksdb_dedup::serve_with_shutdown(grpc_engine, socket_addr, signal).await
+        let res = rocksdb_dedup::serve_with_shutdown(grpc_engine, socket_addr, signal).await;
+        if let Err(ref e) = res {
+            eprintln!("[grpc] 服务启动或运行异常: {}", e);
+            let _ = shutdown_tx_for_err.send(());
+        }
+        res
     });
 
+    let shutdown_tx_for_http = shutdown_tx.clone();
     let http_engine = engine.clone();
     let http_handle = tokio::spawn(async move {
-        rocksdb_dedup::serve_metrics(http_engine, http_addr, shutdown_rx_http).await
+        let res = rocksdb_dedup::serve_metrics(http_engine, http_addr, shutdown_rx_http).await;
+        if let Err(ref e) = res {
+            eprintln!("[http] 监控服务启动或运行异常: {}", e);
+            let _ = shutdown_tx_for_http.send(());
+        }
+        res
     });
 
     // 等待服务正常退出
@@ -235,6 +268,7 @@ async fn run_demo(db_path: String) -> anyhow::Result<()> {
         block_cache_size_mb: 64,
         enable_compression: true,
         block_size_kb: 16,
+        cleaner_compact_threshold: 1000,
     };
 
     println!("打开数据库: {}", config.db_path);
@@ -355,6 +389,7 @@ async fn run_status(addr: &str) -> anyhow::Result<()> {
     println!("  • 积压过期估算:      {}", cleaner["backlog_estimate"]);
     println!("  • 当前清理速度:      {:.1} keys/s", cleaner["current_speed"].as_f64().unwrap_or(0.0));
     println!("  • 当前批次大小:      {}", cleaner["current_batch_size"]);
+    println!("  • 物理整理次数:      {}", cleaner["total_compacts"]);
     println!("  • 运行状态:          {}", if cleaner["is_paused"].as_bool().unwrap_or(false) { "⚠️ 已暂停 (Paused)" } else { "✅ 运行中 (Running)" });
     println!("==================================================");
 
@@ -374,6 +409,14 @@ async fn run_resume_cleaner(addr: &str) -> anyhow::Result<()> {
     let body = http_post(addr, "/cleaner/resume").await?;
     println!("✅ 响应: {}", body.trim());
     println!("清理器已恢复正常后台调度。");
+    Ok(())
+}
+
+async fn run_compact(addr: &str) -> anyhow::Result<()> {
+    println!("正在向 http://{}/compact 发送物理 Compaction 触发请求...", addr);
+    let body = http_post(addr, "/compact").await?;
+    println!("✅ 响应: {}", body.trim());
+    println!("RocksDB 范围物理整理已触发，删除标记（Tombstone）将被物理清除并释放磁盘空间。");
     Ok(())
 }
 
@@ -397,6 +440,7 @@ async fn run_check(db_path: &str, namespace: &str, key: &str) -> anyhow::Result<
         block_cache_size_mb: 32,
         enable_compression: false,
         block_size_kb: 16,
+        cleaner_compact_threshold: 0,
     };
 
     let engine = DedupEngine::open(config).await?;

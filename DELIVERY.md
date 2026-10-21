@@ -8,7 +8,7 @@
 - **嵌入模式**：作为 Rust 库直接引入爬虫框架
 - **服务模式**：独立 gRPC 服务，支持多语言、多实例分布式调用
 
-**交付状态**：✅ 已完成，33 个单元测试全部通过（含高优与中优功能升级）
+**交付状态**：✅ 已完成，36 个 Rust 核心单元测试 + 10 个 Python 分片客户端测试 + 全链路 E2E 自动化测试 100% 全部通过
 
 ---
 
@@ -18,6 +18,7 @@
 rocksdb_demp/
 ├── Cargo.toml              # 项目依赖配置
 ├── build.rs                # proto 编译构建脚本
+├── dedup.example.toml      # 生产环境 TOML 配置文件示例
 ├── 去重系统.txt             # 原始设计文档
 ├── DELIVERY.md             # 本文档（交付说明）
 ├── .gitignore              # Git 忽略规则
@@ -27,27 +28,36 @@ rocksdb_demp/
 │
 ├── src/
 │   ├── lib.rs              # 库入口，导出公共 API
-│   ├── main.rs             # 程序入口（demo / serve 两种模式）
-│   ├── config.rs           # 配置模块（DedupConfig）
+│   ├── main.rs             # 程序入口（demo / serve / status / pause / compact / check）
+│   ├── config.rs           # 配置模块（DedupConfig，支持 TOML 载入与序列化）
 │   ├── error.rs            # 错误类型定义
 │   ├── key.rs              # Key/Value 编解码（大端字节序）
-│   ├── storage.rs          # RocksDB 双 CF 存储层
+│   ├── storage.rs          # RocksDB 双 CF 存储层（支持 compact_range / compact_all）
 │   ├── bloom.rs            # 布隆过滤器加速层（Rayon 并行重建 + 分层热冷双层）
-│   ├── cleaner.rs          # 过期清理后台任务（自适应限速 + 运行期暂停/恢复）
-│   ├── engine.rs           # DedupEngine 主入口（并发批量 check/exists/delete）
+│   ├── cleaner.rs          # 过期清理后台任务（自适应限速 + 运行期暂停/恢复 + 自动 Compaction）
+│   ├── engine.rs           # DedupEngine 主入口（并发批量 check/exists/delete/compact）
 │   ├── server.rs           # gRPC 服务端实现（含优雅停机支持）
-│   └── metrics.rs          # HTTP 监控端点（Prometheus /metrics, /health, /stats）
+│   └── metrics.rs          # HTTP 监控端点（Prometheus /metrics, /health, /stats, /compact）
 │
 ├── benches/
 │   └── dedup_bench.rs      # 基准测试
 │
+├── grafana/
+│   └── rocksdb_dedup_dashboard.json # Grafana 官方监控仪表板模板
+│
+├── tests/
+│   └── run_e2e.py          # 自动化端到端 (E2E) 全链路测试运行器
+│
 └── clients/
     └── python/
-        ├── dedup_client.py       # Python 客户端封装
-        ├── integration_test.py   # 集成测试脚本
-        ├── test_restart.py       # 重启恢复测试
-        ├── requirements.txt      # Python 依赖
-        └── README.md             # Python 客户端使用说明
+        ├── pyproject.toml  # Python 包构建配置
+        ├── src/
+        │   └── dedup_client/
+        │       ├── client.py     # 单节点 gRPC 客户端
+        │       └── sharded.py    # 分布式分片高可用客户端（重试+熔断+Fallback）
+        └── tests/
+            ├── test_integration.py # 单机功能集成测试
+            └── test_sharded.py     # 分片路由、故障容错与熔断单元测试
 ```
 
 ---
@@ -413,43 +423,57 @@ cargo bench
 | **布隆过滤器并行重建** | ✅ 已完成 | 基于 Rayon 多核并行计算键编码与批量填充，重建耗时大幅缩短 |
 | **分层布隆过滤器** | ✅ 已完成 | `LayeredBloomManager` 热冷双层设计，热层快速插入，冷层后台定期无缝原子切换 |
 | **多线程并发批量操作** | ✅ 已完成 | `batch_check_and_set`、`batch_exists`、`batch_delete` 均基于 Rayon 实现多核并行 |
-| **监控与健康检查** | ✅ 已完成 | 独立 HTTP 运维端口（默认 9090），暴露 `/metrics` (Prometheus)、`/health`、`/stats` |
+| **监控与健康检查** | ✅ 已完成 | 独立 HTTP 运维端口（默认 9090），暴露 `/metrics` (Prometheus)、`/health`、`/stats`、`/compact` |
 | **清理器运行期控制** | ✅ 已完成 | 支持 `pause` / `resume` 动态挂起后台清理任务，将 100% 磁盘 IO 保障给爬虫写入高峰 |
 | **RocksDB 存储与分层压缩** | ✅ 已完成 | 共享 Block Cache；上层启用 LZ4 低延迟压缩，底层启用 ZSTD 极限高压缩比，专优爬虫 URL |
-| **分布式分片集群客户端** | ✅ 已完成 | `ShardedDedupClient` 基于 160 虚拟节点一致性哈希环，自动拆分批量请求并发处理并保序重组 |
-| **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`check` 离线诊断 Key |
+| **RocksDB 物理 Compaction 优化** | ✅ 已完成 | `cleaner_compact_threshold` 阈值自动触发 + `/compact` HTTP 端点与 CLI 命令手动回收 Tombstone 墓碑与磁盘碎片 |
+| **TOML 生产配置体系** | ✅ 已完成 | 支持从 `dedup.toml` / `dedup.example.toml` 载入配置，命令行参数智能覆盖 |
+| **分片客户端高可用与容错** | ✅ 已完成 | `ShardedDedupClient` 支持指数退避重试、故障熔断冷却（Circuit Breaker）与哈希环顺延 Fallback |
+| **自动化 E2E 全链路集成测试** | ✅ 已完成 | `tests/run_e2e.py` 自动拉起服务、探针检测、业务与运维全链路压测验证、优雅退出清理 |
+| **Grafana 官方仪表板模板** | ✅ 已完成 | 提供 `grafana/rocksdb_dedup_dashboard.json` 模板，导入即可呈现核心指标大盘 |
+| **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`compact`、`check` 离线诊断 Key |
 
 ---
 
 ## 13. 常用运维与验证命令
 
 ```bash
-# 1. 编译检查与全套测试（含 33 个核心单元测试）
+# 1. 编译检查与全套核心测试（36 个 Rust 单元测试全部通过）
 cargo check
 cargo test
 
 # 2. 运行单机演示
 cargo run -- demo
 
-# 3. 启动去重服务（gRPC :50051 + HTTP 监控 :9090）
-cargo run -- serve --addr 0.0.0.0:50051 --metrics-addr 0.0.0.0:9090 --block-cache-mb 512
+# 3. 启动去重服务（方式 A：使用默认参数）
+cargo run -- serve --addr 0.0.0.0:45051 --metrics-addr 0.0.0.0:49090 --block-cache-mb 512
 
-# 4. 查看当前服务运行状态仪表盘
-cargo run -- status --addr 127.0.0.1:9090
+# 4. 启动去重服务（方式 B：使用生产配置文件）
+cargo run -- serve --config dedup.example.toml
 
-# 5. 爬虫高峰期暂停/恢复后台清理
-cargo run -- pause-cleaner --addr 127.0.0.1:9090
-cargo run -- resume-cleaner --addr 127.0.0.1:9090
+# 5. 查看当前服务运行状态仪表盘
+cargo run -- status --addr 127.0.0.1:49090
 
-# 6. 离线诊断指定 Key 状态与元数据
+# 6. 爬虫高峰期暂停/恢复后台清理
+cargo run -- pause-cleaner --addr 127.0.0.1:49090
+cargo run -- resume-cleaner --addr 127.0.0.1:49090
+
+# 7. 手动触发 RocksDB 物理 Compaction 碎片整理
+cargo run -- compact --addr 127.0.0.1:49090
+
+# 8. 离线诊断指定 Key 状态与元数据
 cargo run -- check --db-path ./data/dedup --namespace crawler --key "https://example.com/test"
 
-# 7. 运行 Python 客户端与分片测试
+# 9. 运行 Python 客户端高可用与分片测试（10 个测试用例全部通过）
 cd clients/python
-python -m unittest tests/test_sharded.py
+python -m unittest tests.test_sharded
+
+# 10. 运行一键端到端 (E2E) 自动化全链路测试套件
+python tests/run_e2e.py
 ```
 
 ---
 
-*文档更新时间：2026-10-16*
-*项目版本：v0.2.0*
+*文档更新时间：2026-10-21*
+*项目版本：v0.2.1*
+

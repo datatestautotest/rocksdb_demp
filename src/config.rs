@@ -43,6 +43,9 @@ pub struct DedupConfig {
 
     /// 数据块大小（KB），默认 16KB（适合随机点查）
     pub block_size_kb: usize,
+
+    /// 过期数据清理累计删除数量达到该阈值时，自动触发 RocksDB 范围 Compaction 回收墓碑与磁盘碎片（0 表示禁用自动压缩）
+    pub cleaner_compact_threshold: u64,
 }
 
 impl Default for DedupConfig {
@@ -62,6 +65,7 @@ impl Default for DedupConfig {
             block_cache_size_mb: 256,
             enable_compression: true,
             block_size_kb: 16,
+            cleaner_compact_threshold: 100_000,
         }
     }
 }
@@ -83,6 +87,53 @@ impl DedupConfig {
             block_cache_size_mb: 16,
             enable_compression: false,
             block_size_kb: 4,
+            cleaner_compact_threshold: 500,
+        }
+    }
+
+    /// 从 TOML 配置文件加载配置
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Self = toml::from_str(&content)?;
+        Ok(config)
+    }
+
+    /// 将配置保存为 TOML 文件
+    pub fn to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_config_file_roundtrip() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let mut config = DedupConfig::default();
+        config.bloom_capacity = 50_000_000;
+        config.cleaner_compact_threshold = 200_000;
+        config.to_file(path).unwrap();
+
+        let loaded = DedupConfig::from_file(path).unwrap();
+        assert_eq!(loaded.bloom_capacity, 50_000_000);
+        assert_eq!(loaded.cleaner_compact_threshold, 200_000);
+        assert_eq!(loaded.cleaner_batch_size, 10_000);
+    }
+
+    #[test]
+    fn test_example_toml_valid() {
+        let example_path = std::path::Path::new("dedup.example.toml");
+        if example_path.exists() {
+            let config = DedupConfig::from_file(example_path).unwrap();
+            assert_eq!(config.bloom_capacity, 100_000_000);
+            assert_eq!(config.cleaner_compact_threshold, 100_000);
         }
     }
 }

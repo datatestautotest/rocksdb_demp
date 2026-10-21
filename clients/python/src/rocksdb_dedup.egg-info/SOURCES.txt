@@ -5,9 +5,11 @@ src/dedup_client/client.py
 src/dedup_client/dedup_pb2.py
 src/dedup_client/dedup_pb2_grpc.py
 src/dedup_client/py.typed
+src/dedup_client/sharded.py
 src/rocksdb_dedup.egg-info/PKG-INFO
 src/rocksdb_dedup.egg-info/SOURCES.txt
 src/rocksdb_dedup.egg-info/dependency_links.txt
 src/rocksdb_dedup.egg-info/requires.txt
 src/rocksdb_dedup.egg-info/top_level.txt
 tests/test_integration.py
+tests/test_sharded.py
