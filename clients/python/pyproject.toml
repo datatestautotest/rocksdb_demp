@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rocksdb-dedup"
-version = "0.1.1"
+version = "0.1.2"
 description = "基于 RocksDB 与布隆过滤器的高性能去重服务 Python 客户端"
 readme = "README.md"
 requires-python = ">=3.8"
