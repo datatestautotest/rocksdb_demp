@@ -46,6 +46,10 @@ pub struct DedupConfig {
 
     /// 过期数据清理累计删除数量达到该阈值时，自动触发 RocksDB 范围 Compaction 回收墓碑与磁盘碎片（0 表示禁用自动压缩）
     pub cleaner_compact_threshold: u64,
+
+    /// API 访问密钥 Token（用于 gRPC 客户端鉴权，None 或空表示不启用鉴权）
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 impl Default for DedupConfig {
@@ -66,6 +70,7 @@ impl Default for DedupConfig {
             enable_compression: true,
             block_size_kb: 16,
             cleaner_compact_threshold: 100_000,
+            auth_token: None,
         }
     }
 }
@@ -88,6 +93,7 @@ impl DedupConfig {
             enable_compression: false,
             block_size_kb: 4,
             cleaner_compact_threshold: 500,
+            auth_token: None,
         }
     }
 

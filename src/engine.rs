@@ -547,6 +547,11 @@ impl DedupEngine {
     pub fn store(&self) -> &DedupStore {
         &self.store
     }
+
+    /// 获取当前引擎配置引用
+    pub fn config(&self) -> &DedupConfig {
+        &self.config
+    }
 }
 
 // 简单的日志输出包装（避免引入 tracing 依赖）

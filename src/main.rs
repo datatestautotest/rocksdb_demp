@@ -66,6 +66,10 @@ enum Commands {
         /// 是否开启 LSM-Tree 分层压缩（LZ4 + ZSTD）
         #[arg(long, default_value_t = true)]
         enable_compression: bool,
+
+        /// API 访问密钥 Token（可选，设置后客户端必须携带此 Token 才能访问）
+        #[arg(long)]
+        auth_token: Option<String>,
     },
     /// 查看运行中服务的监控状态
     Status {
@@ -125,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             cleaner_batch_size,
             block_cache_mb,
             enable_compression,
+            auth_token,
         } => {
             run_serve(
                 config,
@@ -136,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 cleaner_batch_size,
                 block_cache_mb,
                 enable_compression,
+                auth_token,
             )
             .await
         }
@@ -161,8 +167,9 @@ async fn run_serve(
     cleaner_batch_size: usize,
     block_cache_mb: usize,
     enable_compression: bool,
+    cli_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
-    let config = if let Some(ref path) = config_file {
+    let mut config = if let Some(ref path) = config_file {
         println!("正在从配置文件加载: {}", path);
         DedupConfig::from_file(path)?
     } else {
@@ -181,8 +188,13 @@ async fn run_serve(
             enable_compression,
             block_size_kb: 16,
             cleaner_compact_threshold: 100_000,
+            auth_token: None,
         }
     };
+
+    if cli_auth_token.is_some() {
+        config.auth_token = cli_auth_token;
+    }
 
     println!("=== RocksDB 去重服务启动 ===");
     println!("数据目录:     {}", config.db_path);
@@ -269,6 +281,7 @@ async fn run_demo(db_path: String) -> anyhow::Result<()> {
         enable_compression: true,
         block_size_kb: 16,
         cleaner_compact_threshold: 1000,
+        auth_token: None,
     };
 
     println!("打开数据库: {}", config.db_path);
@@ -441,6 +454,7 @@ async fn run_check(db_path: &str, namespace: &str, key: &str) -> anyhow::Result<
         enable_compression: false,
         block_size_kb: 16,
         cleaner_compact_threshold: 0,
+        auth_token: None,
     };
 
     let engine = DedupEngine::open(config).await?;

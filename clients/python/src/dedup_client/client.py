@@ -20,6 +20,7 @@ RocksDB 去重服务 gRPC 客户端
 """
 
 import time
+from collections import namedtuple
 from typing import Optional, List, Tuple
 
 import grpc
@@ -28,31 +29,103 @@ from . import dedup_pb2
 from . import dedup_pb2_grpc
 
 
+class _ClientCallDetails(
+    namedtuple(
+        "_ClientCallDetails",
+        [
+            "method",
+            "timeout",
+            "metadata",
+            "credentials",
+            "wait_for_ready",
+            "compression",
+        ],
+    ),
+    grpc.ClientCallDetails,
+):
+    pass
+
+
+class _AuthClientInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+    grpc.StreamUnaryClientInterceptor,
+    grpc.StreamStreamClientInterceptor,
+):
+    """为每一个 gRPC 请求自动注入 Authorization Bearer 与 x-api-key 认证头"""
+
+    def __init__(self, token: str):
+        self._token = token
+
+    def _add_metadata(self, client_call_details):
+        metadata = list(client_call_details.metadata or [])
+        metadata.append(("authorization", f"Bearer {self._token}"))
+        metadata.append(("x-api-key", self._token))
+        return _ClientCallDetails(
+            client_call_details.method,
+            client_call_details.timeout,
+            metadata,
+            client_call_details.credentials,
+            client_call_details.wait_for_ready,
+            client_call_details.compression,
+        )
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        return continuation(self._add_metadata(client_call_details), request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        return continuation(self._add_metadata(client_call_details), request)
+
+    def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
+        return continuation(self._add_metadata(client_call_details), request_iterator)
+
+    def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+        return continuation(self._add_metadata(client_call_details), request_iterator)
+
+
 class DedupClient:
     """去重服务 gRPC 客户端
 
     提供基于 RocksDB + 布隆过滤器的高性能持久化去重能力，
-    支持多租户 namespace 隔离、原子检查写入、批量操作等。
+    支持多租户 namespace 隔离、原子检查写入、批量操作、Token 鉴权等。
 
     Attributes:
         addr: 服务端地址，如 "localhost:50051"
+        auth_token: 认证 Token（可选）
         timeout: 默认超时时间（秒）
     """
 
-    def __init__(self, addr: str, timeout: float = 5.0):
+    def __init__(
+        self,
+        addr: str,
+        auth_token: Optional[str] = None,
+        timeout: float = 5.0,
+    ):
         """
         Args:
             addr: 服务地址，如 "localhost:50051"
+            auth_token: 认证密钥 Token（可选，与服务端配置保持一致）
             timeout: 默认超时时间（秒）
         """
         self.addr = addr
+        self.auth_token = auth_token
         self.timeout = timeout
-        self.channel = grpc.insecure_channel(addr)
+        raw_channel = grpc.insecure_channel(addr)
+        self._raw_channel = raw_channel
+        if auth_token:
+            self.channel = grpc.intercept_channel(
+                raw_channel, _AuthClientInterceptor(auth_token)
+            )
+        else:
+            self.channel = raw_channel
         self.stub = dedup_pb2_grpc.DedupServiceStub(self.channel)
 
     def close(self):
         """关闭连接"""
-        self.channel.close()
+        if hasattr(self, "_raw_channel"):
+            self._raw_channel.close()
+        elif hasattr(self, "channel"):
+            self.channel.close()
 
     def __enter__(self):
         return self

@@ -78,7 +78,7 @@ class TestShardedDedupClient(unittest.TestCase):
         mock_nodes = ["127.0.0.1:50051", "127.0.0.1:50052"]
         mock_instances = {}
 
-        def create_mock(addr, timeout=5.0):
+        def create_mock(addr, *args, **kwargs):
             m = MagicMock()
             m.addr = addr
             mock_instances[addr] = m
@@ -113,7 +113,7 @@ class TestShardedDedupClient(unittest.TestCase):
         mock_nodes = ["127.0.0.1:50051", "127.0.0.1:50052"]
         mock_instances = {}
 
-        def create_mock(addr, timeout=5.0):
+        def create_mock(addr, *args, **kwargs):
             m = MagicMock()
             m.addr = addr
             mock_instances[addr] = m
@@ -146,7 +146,7 @@ class TestShardedDedupClient(unittest.TestCase):
         mock_nodes = ["127.0.0.1:50051", "127.0.0.1:50052"]
         mock_instances = {}
 
-        def create_mock(addr, timeout=5.0):
+        def create_mock(addr, *args, **kwargs):
             m = MagicMock()
             m.addr = addr
             mock_instances[addr] = m
@@ -184,7 +184,7 @@ class TestShardedDedupClient(unittest.TestCase):
         mock_nodes = ["127.0.0.1:50051", "127.0.0.1:50052"]
         mock_instances = {}
 
-        def create_mock(addr, timeout=5.0):
+        def create_mock(addr, *args, **kwargs):
             m = MagicMock()
             m.addr = addr
             mock_instances[addr] = m
@@ -213,6 +213,15 @@ class TestShardedDedupClient(unittest.TestCase):
         # 其中部分结果为 None，部分为 duplicate
         self.assertTrue(any(r is None for r in results))
 
+        sharded.close()
+
+    @patch("dedup_client.sharded.DedupClient")
+    def test_auth_token_forwarding(self, mock_client_cls):
+        mock_nodes = ["127.0.0.1:50051", "127.0.0.1:50052"]
+        sharded = ShardedDedupClient(mock_nodes, auth_token="secret_token_123")
+        self.assertEqual(sharded.auth_token, "secret_token_123")
+        for call_args in mock_client_cls.call_args_list:
+            self.assertEqual(call_args.kwargs.get("auth_token"), "secret_token_123")
         sharded.close()
 
 

@@ -105,6 +105,7 @@ class ShardedDedupClient:
     def __init__(
         self,
         node_addrs: Sequence[str],
+        auth_token: Optional[str] = None,
         timeout: float = 5.0,
         replicas: int = 160,
         max_workers: int = 16,
@@ -117,6 +118,7 @@ class ShardedDedupClient:
         """
         Args:
             node_addrs: 节点地址列表，如 ["127.0.0.1:50051", "127.0.0.1:50052"]
+            auth_token: 认证密钥 Token（可选，集群节点共享认证密钥）
             timeout: 每个 gRPC 请求的超时时间（秒）
             replicas: 每个物理节点的虚拟节点数量
             max_workers: 批量多节点请求并发线程池大小
@@ -130,6 +132,7 @@ class ShardedDedupClient:
             raise ValueError("node_addrs 不能为空")
 
         self.ring = ConsistentHashRing(node_addrs, replicas=replicas)
+        self.auth_token = auth_token
         self.timeout = timeout
         self.max_workers = max_workers
         self.max_retries = max_retries
@@ -139,7 +142,7 @@ class ShardedDedupClient:
         self.cooling_time = cooling_time
 
         self.clients: Dict[str, DedupClient] = {
-            addr: DedupClient(addr, timeout=timeout) for addr in node_addrs
+            addr: DedupClient(addr, auth_token=auth_token, timeout=timeout) for addr in node_addrs
         }
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 

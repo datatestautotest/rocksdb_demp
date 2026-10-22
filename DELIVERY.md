@@ -8,7 +8,7 @@
 - **嵌入模式**：作为 Rust 库直接引入爬虫框架
 - **服务模式**：独立 gRPC 服务，支持多语言、多实例分布式调用
 
-**交付状态**：✅ 已完成，36 个 Rust 核心单元测试 + 10 个 Python 分片客户端测试 + 全链路 E2E 自动化测试 100% 全部通过
+**交付状态**：✅ 已完成，38 个 Rust 核心单元测试 + 11 个 Python 客户端测试 + 全链路 E2E 自动化测试 100% 全部通过，支持 gRPC 安全鉴权 Token（Rust 服务端 + Python SDK v0.1.3 已发布至 PyPI）
 
 ---
 
@@ -145,6 +145,14 @@ cargo run -- serve \
 | `--bloom-capacity` | 10,000,000 | 布隆过滤器初始容量 |
 | `--bloom-fpp` | 0.01 | 目标误判率 |
 | `--cleaner-batch-size` | 10,000 | 清理批大小 |
+| `--auth-token` | 无（默认不开启鉴权） | gRPC 服务连接鉴权密钥（可配置文件 `auth_token` 指定） |
+
+### 4.4 安全鉴权机制 (Auth Token)
+
+为了防止公网或内网未授权访问，服务端支持在配置文件 (`auth_token = "..."`) 或命令行 (`--auth-token "..."`) 中设置密码：
+- **请求拦截**：gRPC 服务端全局拦截器校验 `authorization: Bearer <token>` 或 `x-api-key: <token>` 请求头。
+- **向后兼容**：若未配置 `auth_token`，系统保持开放模式，原有调用完全不受影响。
+- **SDK 适配**：Python SDK（`DedupClient` 与 `ShardedDedupClient`）只需传入 `auth_token="xxx"` 即可自动在每一次 RPC 中透明携带鉴权凭证。
 
 ---
 
@@ -433,6 +441,7 @@ cargo bench
 | **Grafana 官方仪表板模板** | ✅ 已完成 | 提供 `grafana/rocksdb_dedup_dashboard.json` 模板，导入即可呈现核心指标大盘 |
 | **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`compact`、`check` 离线诊断 Key |
 | **跨平台 Release CI 兼容体系** | ✅ 已完成 | 自动化构建发布 Windows (`.zip`)、Linux Musl（纯静态零依赖）、Linux GNU（兼容 glibc >= 2.31）与 macOS |
+| **gRPC 安全密码鉴权 (Auth Token)** | ✅ 已完成 | 支持 Bearer Token / x-api-key 拦截校验，服务端无缝保护，Python SDK 统一适配 |
 
 ---
 
@@ -452,43 +461,46 @@ GitHub Releases 页面针对不同操作系统架构提供多种预编译包：
 ## 14. 常用运维与验证命令
 
 ```bash
-# 1. 编译检查与全套核心测试（36 个 Rust 单元测试全部通过）
+# 1. 编译检查与全套核心测试（38 个 Rust 单元测试全部通过）
 cargo check
 cargo test
 
 # 2. 运行单机演示
 cargo run -- demo
 
-# 3. 启动去重服务（方式 A：使用默认参数）
-cargo run -- serve --addr 0.0.0.0:45051 --metrics-addr 0.0.0.0:49090 --block-cache-mb 512
+# 3. 启动去重服务（方式 A：带密码鉴权启动）
+cargo run -- serve --addr 0.0.0.0:50051 --auth-token "your-secret-token"
 
 # 4. 启动去重服务（方式 B：使用生产配置文件）
 cargo run -- serve --config dedup.example.toml
 
 # 5. 查看当前服务运行状态仪表盘
-cargo run -- status --addr 127.0.0.1:49090
+cargo run -- status --addr 127.0.0.1:9090
 
 # 6. 爬虫高峰期暂停/恢复后台清理
-cargo run -- pause-cleaner --addr 127.0.0.1:49090
-cargo run -- resume-cleaner --addr 127.0.0.1:49090
+cargo run -- pause-cleaner --addr 127.0.0.1:9090
+cargo run -- resume-cleaner --addr 127.0.0.1:9090
 
 # 7. 手动触发 RocksDB 物理 Compaction 碎片整理
-cargo run -- compact --addr 127.0.0.1:49090
+cargo run -- compact --addr 127.0.0.1:9090
 
 # 8. 离线诊断指定 Key 状态与元数据
 cargo run -- check --db-path ./data/dedup --namespace crawler --key "https://example.com/test"
 
-# 9. 运行 Python 客户端高可用与分片测试（10 个测试用例全部通过）
+# 9. 运行 Python 客户端高可用与分片测试（11 个测试用例全部通过）
 cd clients/python
 python -m unittest tests.test_sharded
 
-# 10. 运行一键端到端 (E2E) 自动化全链路测试套件
-python tests/run_e2e.py
+# 10. Python 客户端连接带鉴权服务端示例
+# pip install rocksdb-dedup
+from dedup_client import DedupClient
+client = DedupClient("127.0.0.1:50051", auth_token="your-secret-token")
+is_new = client.check_and_set("news_spider", "https://example.com/1", expire_at_ms=1893456000000)
 ```
 
 ---
 
-*文档更新时间：2026-10-21*
-*项目版本：v0.2.2*
+*文档更新时间：2026-10-22*
+*项目版本：v0.2.3 (Python SDK v0.1.3)*
 
 

@@ -53,3 +53,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.tar.gz
+*.whl
