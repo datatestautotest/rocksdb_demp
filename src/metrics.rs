@@ -1,10 +1,12 @@
 //! 运维监控与 HTTP 端点
 //!
 //! 提供：
+//! - 业务 RESTful API：`/api/v1/check`、`/api/v1/batch_check`、`/api/v1/exists`、`/api/v1/batch_exists`、`/api/v1/get`、`/api/v1/delete`、`/api/v1/batch_delete`
 //! - `/health`：服务健康检查（用于 K8s liveness/readiness probe）
 //! - `/metrics`：Prometheus 格式指标（用于 Prometheus 抓取）
 //! - `/stats`：详细 JSON 状态接口（用于 CLI / 诊断工具）
 //! - `/cleaner/pause` 与 `/cleaner/resume`：运行时控制清理器挂起/恢复
+//! - `/compact`：手动触发 RocksDB 物理 Compaction
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,19 +18,21 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
+use crate::api;
 use crate::engine::DedupEngine;
 
-/// HTTP 监控服务状态
+/// HTTP 服务状态
 #[derive(Clone)]
 pub struct MetricsServerState {
     pub engine: Arc<DedupEngine>,
 }
 
-/// 构建监控路由 Router
+/// 构建包含监控与业务 RESTful API 的统一 HTTP 路由 Router
 pub fn create_metrics_router(engine: Arc<DedupEngine>) -> Router {
     let state = MetricsServerState { engine };
 
     Router::new()
+        // 运维与监控端点
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
         .route("/metrics", get(prometheus_metrics_handler))
@@ -36,6 +40,14 @@ pub fn create_metrics_router(engine: Arc<DedupEngine>) -> Router {
         .route("/cleaner/pause", post(cleaner_pause_handler))
         .route("/cleaner/resume", post(cleaner_resume_handler))
         .route("/compact", post(compact_handler))
+        // 业务 RESTful API (v1)
+        .route("/api/v1/check", post(api::check_handler))
+        .route("/api/v1/batch_check", post(api::batch_check_handler))
+        .route("/api/v1/exists", post(api::exists_handler))
+        .route("/api/v1/batch_exists", post(api::batch_exists_handler))
+        .route("/api/v1/get", post(api::get_handler))
+        .route("/api/v1/delete", post(api::delete_handler))
+        .route("/api/v1/batch_delete", post(api::batch_delete_handler))
         .with_state(state)
 }
 
@@ -102,34 +114,43 @@ pub async fn prometheus_metrics_handler(State(state): State<MetricsServerState>)
     out.push_str("# TYPE rocksdb_dedup_cleaner_deleted_total counter\n");
     out.push_str(&format!("rocksdb_dedup_cleaner_deleted_total {}\n", cleaner.total_deleted));
 
-    out.push_str("# HELP rocksdb_dedup_cleaner_backlog_estimate Estimated count of pending expired keys.\n");
+    out.push_str("# HELP rocksdb_dedup_cleaner_backlog_estimate Estimated number of expired keys pending deletion.\n");
     out.push_str("# TYPE rocksdb_dedup_cleaner_backlog_estimate gauge\n");
     out.push_str(&format!("rocksdb_dedup_cleaner_backlog_estimate {}\n", cleaner.backlog_estimate));
 
-    out.push_str("# HELP rocksdb_dedup_cleaner_speed Cleaner deletion speed in keys per second.\n");
+    out.push_str("# HELP rocksdb_dedup_cleaner_speed Keys deleted per second in recent cleanup rounds.\n");
     out.push_str("# TYPE rocksdb_dedup_cleaner_speed gauge\n");
     out.push_str(&format!("rocksdb_dedup_cleaner_speed {:.2}\n", cleaner.current_speed));
 
-    out.push_str("# HELP rocksdb_dedup_cleaner_paused Whether background cleaner is paused (1=paused, 0=running).\n");
+    out.push_str("# HELP rocksdb_dedup_cleaner_batch_size Current adaptive cleanup batch size.\n");
+    out.push_str("# TYPE rocksdb_dedup_cleaner_batch_size gauge\n");
+    out.push_str(&format!("rocksdb_dedup_cleaner_batch_size {}\n", cleaner.current_batch_size));
+
+    out.push_str("# HELP rocksdb_dedup_cleaner_runs_total Total cleanup loop execution rounds.\n");
+    out.push_str("# TYPE rocksdb_dedup_cleaner_runs_total counter\n");
+    out.push_str(&format!("rocksdb_dedup_cleaner_runs_total {}\n", cleaner.run_count));
+
+    out.push_str("# HELP rocksdb_dedup_cleaner_paused Whether the background cleaner is currently paused (1=paused, 0=running).\n");
     out.push_str("# TYPE rocksdb_dedup_cleaner_paused gauge\n");
     out.push_str(&format!("rocksdb_dedup_cleaner_paused {}\n", if cleaner.is_paused { 1 } else { 0 }));
 
-    out.push_str("# HELP rocksdb_dedup_cleaner_compacts_total Total count of RocksDB compactions executed.\n");
-    out.push_str("# TYPE rocksdb_dedup_cleaner_compacts_total counter\n");
-    out.push_str(&format!("rocksdb_dedup_cleaner_compacts_total {}\n", cleaner.total_compacts));
+    out.push_str("# HELP rocksdb_dedup_compacts_total Total RocksDB manual compaction operations triggered.\n");
+    out.push_str("# TYPE rocksdb_dedup_compacts_total counter\n");
+    out.push_str(&format!("rocksdb_dedup_compacts_total {}\n", cleaner.total_compacts));
 
     // RocksDB 存储指标
-    out.push_str("# HELP rocksdb_dedup_rocksdb_estimated_keys Total estimated keys in RocksDB cf_dedup.\n");
-    out.push_str("# TYPE rocksdb_dedup_rocksdb_estimated_keys gauge\n");
-    out.push_str(&format!("rocksdb_dedup_rocksdb_estimated_keys {}\n", total_keys));
+    out.push_str("# HELP rocksdb_dedup_total_keys Estimated total keys in RocksDB cf_dedup.\n");
+    out.push_str("# TYPE rocksdb_dedup_total_keys gauge\n");
+    out.push_str(&format!("rocksdb_dedup_total_keys {}\n", total_keys));
 
     Response::builder()
-        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         .body(out.into())
         .unwrap()
 }
 
-/// JSON 状态接口
+/// 详细运行期统计 JSON 端点
 pub async fn stats_handler(State(state): State<MetricsServerState>) -> (StatusCode, Json<serde_json::Value>) {
     let bloom = state.engine.bloom_stats();
     let cleaner = state.engine.cleaner_stats();
@@ -137,7 +158,7 @@ pub async fn stats_handler(State(state): State<MetricsServerState>) -> (StatusCo
 
     let body = json!({
         "rocksdb": {
-            "estimated_keys": total_keys
+            "estimated_keys": total_keys,
         },
         "bloom": {
             "capacity": bloom.capacity,
@@ -189,7 +210,7 @@ pub async fn compact_handler(State(state): State<MetricsServerState>) -> (Status
     })))
 }
 
-/// 启动 HTTP 监控服务（带优雅关闭监听）
+/// 启动 HTTP 服务（包含 RESTful API 与运维监控端点，带优雅关闭监听）
 pub async fn serve_metrics(
     engine: Arc<DedupEngine>,
     addr: SocketAddr,
@@ -197,7 +218,9 @@ pub async fn serve_metrics(
 ) -> anyhow::Result<()> {
     let app = create_metrics_router(engine);
 
-    println!("[http] 监控与健康检查服务启动，监听 http://{}", addr);
+    println!("[http] HTTP 服务已启动，监听 http://{}", addr);
+    println!("       ├── RESTful API: http://{}/api/v1 (单条/批量查重与删除)", addr);
+    println!("       └── 监控运维:   http://{0}/health, http://{0}/stats, http://{0}/metrics", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)

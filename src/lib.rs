@@ -15,6 +15,7 @@ pub mod cleaner;
 pub mod engine;
 pub mod server;
 pub mod metrics;
+pub mod api;
 
 pub use config::DedupConfig;
 pub use engine::{CheckResult, DedupEngine};

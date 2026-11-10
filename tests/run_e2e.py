@@ -46,6 +46,16 @@ def http_post(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def http_post_json(url: str, data: dict, headers: dict = None) -> dict:
+    req_headers = {"User-Agent": "E2E-Tester", "Content-Type": "application/json"}
+    if headers:
+        req_headers.update(headers)
+    req_body = json.dumps(data).encode("utf-8")
+    req = urllib.request.Request(url, data=req_body, headers=req_headers, method="POST")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def main():
     print("=" * 70)
     print("       RocksDB 去重服务自动化端到端 (E2E) 全链路测试")
@@ -175,11 +185,83 @@ def main():
         # Prometheus 指标校验
         prom_text = http_get_text(f"http://{metrics_addr}/metrics")
         assert "rocksdb_dedup_bloom_capacity" in prom_text
-        assert "rocksdb_dedup_cleaner_compacts_total" in prom_text
+        assert "rocksdb_dedup_compacts_total" in prom_text
         print("      ✅ HTTP 运维控制（Pause/Resume/Compact/Prometheus）验证通过")
 
-        # 6. 分布式分片客户端连通测试
-        print("[6/6] 运行高可用分布式分片客户端 (ShardedDedupClient) 联调测试...")
+        # 6. 运行 HTTP RESTful API (v1) 端到端功能测试
+        print("[6/7] 运行 HTTP RESTful API (v1) 单条/批量查重与删除测试...")
+        api_base = f"http://{metrics_addr}/api/v1"
+
+        # (1) 单条 check 写入
+        http_r1 = http_post_json(f"{api_base}/check", {
+            "namespace": "http_test",
+            "key": "https://example.com/http/1",
+            "expire_at_ms": expire_at,
+            "metadata": '{"source": "http_api"}'
+        })
+        assert http_r1.get("status") == "inserted" and http_r1.get("is_duplicate") is False
+
+        # (2) 单条 check 重复
+        http_r2 = http_post_json(f"{api_base}/check", {
+            "namespace": "http_test",
+            "key": "https://example.com/http/1",
+            "expire_at_ms": expire_at
+        })
+        assert http_r2.get("status") == "duplicate" and http_r2.get("is_duplicate") is True
+        assert http_r2.get("value", {}).get("metadata") == '{"source": "http_api"}'
+
+        # (3) exists 与 get
+        exists_res = http_post_json(f"{api_base}/exists", {
+            "namespace": "http_test",
+            "key": "https://example.com/http/1"
+        })
+        assert exists_res.get("exists") is True
+
+        get_res = http_post_json(f"{api_base}/get", {
+            "namespace": "http_test",
+            "key": "https://example.com/http/1"
+        })
+        assert get_res.get("found") is True
+        assert get_res.get("value", {}).get("metadata") == '{"source": "http_api"}'
+
+        # (4) 批量 check
+        batch_payload = {
+            "namespace": "http_test",
+            "items": [
+                {"key": "https://example.com/http/1", "expire_at_ms": expire_at}, # 重复
+                {"key": "https://example.com/http/batch_2", "expire_at_ms": expire_at, "metadata": "b2"},
+                {"key": "https://example.com/http/batch_3", "expire_at_ms": expire_at, "metadata": "b3"},
+            ]
+        }
+        batch_res = http_post_json(f"{api_base}/batch_check", batch_payload)
+        assert batch_res.get("total") == 3
+        assert batch_res["results"][0]["status"] == "duplicate"
+        assert batch_res["results"][1]["status"] == "inserted"
+        assert batch_res["results"][2]["status"] == "inserted"
+
+        # (5) 批量 exists
+        batch_exists_res = http_post_json(f"{api_base}/batch_exists", {
+            "namespace": "http_test",
+            "keys": ["https://example.com/http/1", "https://example.com/http/none"]
+        })
+        assert batch_exists_res.get("results") == [True, False]
+
+        # (6) 删除与批量删除
+        del_res = http_post_json(f"{api_base}/delete", {
+            "namespace": "http_test",
+            "key": "https://example.com/http/1"
+        })
+        assert del_res.get("deleted") is True
+
+        batch_del_res = http_post_json(f"{api_base}/batch_delete", {
+            "namespace": "http_test",
+            "keys": ["https://example.com/http/batch_2", "https://example.com/http/batch_3"]
+        })
+        assert batch_del_res.get("results") == [True, True]
+        print("      ✅ HTTP RESTful API (v1) 全部接口端到端验证通过")
+
+        # 7. 分布式分片客户端连通测试
+        print("[7/7] 运行高可用分布式分片客户端 (ShardedDedupClient) 联调测试...")
         with ShardedDedupClient([grpc_addr], replicas=64) as sharded:
             sharded_items = [
                 ("sharded_ns", f"https://example.com/sharded/{i}".encode("utf-8"), expire_at, None)

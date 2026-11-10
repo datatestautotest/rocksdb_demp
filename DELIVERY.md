@@ -156,7 +156,88 @@ cargo run -- serve \
 
 ---
 
-## 5. 公共 API（Rust 库）
+
+---
+
+## 5. HTTP RESTful API (双协议架构)
+
+服务启动时，除了监听 gRPC 端口（默认 50051），还会同步开启高性能 HTTP 服务（默认 9090 端口，基于 Tokio + Axum），同时提供**业务去重 RESTful 接口**与**运维监控端点**。
+
+### 5.1 统一安全鉴权 (Auth Token)
+
+若服务端配置了 `auth_token`，业务接口请求需在 HTTP Header 中携带凭证（二选一）：
+- `Authorization: Bearer <your-token>`
+- `X-API-Key: <your-token>`
+
+*(如未配置 auth_token，则为免密开放模式；/health 与 /metrics 端点始终开放便于探针抓取)*
+
+### 5.2 核心业务接口列表
+
+| 方法与路径 | 功能说明 | 适用场景 |
+|---|---|---|
+| `POST /api/v1/check` | 单条查重并原子写入 | **推荐外部微服务使用**（一次一个请求） |
+| `POST /api/v1/batch_check` | 批量查重并原子写入 | 爬虫批次提交、消息队列批量消费 |
+| `POST /api/v1/exists` | 单条存在性检查（只读） | 爬取前轻量预检 |
+| `POST /api/v1/batch_exists` | 批量存在性检查 | 批量只读预检 |
+| `POST /api/v1/get` | 获取 Key 详情及元数据 | 查看创建时间、过期时间与 metadata |
+| `POST /api/v1/delete` | 删除单条 Key | 数据失效处理 |
+| `POST /api/v1/batch_delete` | 批量删除 Key | 批量失效处理 |
+
+### 5.3 接口调用详情与示例
+
+#### (1) 单条查重并写入 (`POST /api/v1/check`)
+- **请求 Body**:
+  ```json
+  {
+    "namespace": "spider_news",
+    "key": "https://example.com/article/1001",
+    "expire_at_ms": 1735689600000,
+    "metadata": "{\"source\": \"tech_news\"}"
+  }
+  ```
+- **响应 Body**:
+  ```json
+  {
+    "status": "inserted",       // "inserted" | "duplicate" | "expired_and_replaced"
+    "is_duplicate": false,
+    "value": null                // 若已存在，返回旧记录信息
+  }
+  ```
+
+#### (2) 批量查重并写入 (`POST /api/v1/batch_check`)
+- **请求 Body**:
+  ```json
+  {
+    "namespace": "spider_news",
+    "items": [
+      { "key": "https://example.com/1", "expire_at_ms": 1735689600000 },
+      { "key": "https://example.com/2", "expire_at_ms": 1735689600000, "metadata": "custom" }
+    ]
+  }
+  ```
+- **响应 Body**:
+  ```json
+  {
+    "total": 2,
+    "results": [
+      { "key": "https://example.com/1", "status": "inserted", "is_duplicate": false, "value": null },
+      { "key": "https://example.com/2", "status": "duplicate", "is_duplicate": true, "value": { "expire_at_ms": 1735689600000, "created_at_ms": 1735600000000, "metadata": "custom" } }
+    ]
+  }
+  ```
+
+#### (3) curl 快速验证命令
+```bash
+# 单条写入与查重
+curl -X POST http://127.0.0.1:9090/api/v1/check \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer spiderhub_dedup_data' \
+  -d '{"namespace":"test","key":"https://news.cn/1","expire_at_ms":1793260000000}'
+```
+
+---
+
+## 6. 公共 API（Rust 库）
 
 ### 5.1 核心查重接口
 
@@ -208,7 +289,7 @@ pub fn check_and_set(
 
 ---
 
-## 6. Python 客户端
+## 7. Python 客户端
 
 ### 6.1 安装
 
@@ -259,7 +340,7 @@ with DedupClient("localhost:50051") as client:
 
 ---
 
-## 7. 技术栈
+## 8. 技术栈
 
 | 组件 | 选型 | 版本 |
 |---|---|---|
@@ -280,7 +361,7 @@ with DedupClient("localhost:50051") as client:
 
 ---
 
-## 8. 设计要点与正确性保证
+## 9. 设计要点与正确性保证
 
 ### 8.1 Hash 冲突处理
 
@@ -314,7 +395,7 @@ Key 中所有整数统一使用大端字节序编码，保证 RocksDB 字典序�
 
 ---
 
-## 9. 测试覆盖
+## 10. 测试覆盖
 
 ### 9.1 单元测试（26 个，全部通过）
 
@@ -373,7 +454,7 @@ cargo bench
 
 ---
 
-## 10. 性能预期
+## 11. 性能预期
 
 ### 10.1 内存占用
 
@@ -400,7 +481,7 @@ cargo bench
 
 ---
 
-## 11. 部署建议
+## 12. 部署建议
 
 ### 11.1 部署模式选择
 
@@ -424,7 +505,7 @@ cargo bench
 
 ---
 
-## 12. 优化方向与实现状态
+## 13. 优化方向与实现状态
 
 | 优化方向 | 状态 | 实现说明 |
 |---|---|---|
@@ -442,10 +523,11 @@ cargo bench
 | **CLI 运维管理工具** | ✅ 已完成 | 支持 `status` 查看仪表盘、`pause-cleaner` / `resume-cleaner`、`compact`、`check` 离线诊断 Key |
 | **跨平台 Release CI 兼容体系** | ✅ 已完成 | 自动化构建发布 Windows (`.zip`)、Linux Musl（纯静态零依赖）、Linux GNU（兼容 glibc >= 2.31）与 macOS |
 | **gRPC 安全密码鉴权 (Auth Token)** | ✅ 已完成 | 支持 Bearer Token / x-api-key 拦截校验，服务端无缝保护，Python SDK 统一适配 |
+| **双协议架构 (gRPC + HTTP RESTful)** | ✅ 已完成 | 内置基于 Axum 的 HTTP 业务去重接口 (/api/v1)，支持单条/批量查重、元数据获取、删除与统一 Token 鉴权 |
 
 ---
 
-## 13. GitHub Release 预编译包选择指南
+## 14. GitHub Release 预编译包选择指南
 
 GitHub Releases 页面针对不同操作系统架构提供多种预编译包：
 
@@ -458,10 +540,10 @@ GitHub Releases 页面针对不同操作系统架构提供多种预编译包：
 
 ---
 
-## 14. 常用运维与验证命令
+## 15. 常用运维与验证命令
 
 ```bash
-# 1. 编译检查与全套核心测试（38 个 Rust 单元测试全部通过）
+# 1. 编译检查与全套核心测试（40 个 Rust 单元测试全部通过）
 cargo check
 cargo test
 
