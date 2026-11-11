@@ -10,48 +10,51 @@ permissions:
   contents: write
 
 jobs:
-  build-linux-musl:
-    name: Build Linux Musl (x86_64 fully-static zero-dependency)
+  build-linux:
+    name: Build Linux x86_64 (GLIBC 2.27+ & Static libstdc++ Max Compatibility)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build in Alpine Musl Container (Fully Static & Zero glibc Dependency)
+      - name: Build in Ubuntu 18.04 Container (GLIBC 2.27 + Static C++ Runtime)
         run: |
           docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
-            rust:alpine sh -c "
-              apk update && apk add --no-cache \
-                build-base clang clang-dev llvm-dev cmake git protobuf protobuf-dev linux-headers perl
-              export LIBCLANG_PATH=/usr/lib
-              RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-musl --bin rocksdb-dedup
+            ubuntu:18.04 bash -c "
+              set -e
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                curl git ca-certificates build-essential clang libclang-dev pkg-config libssl-dev cmake make
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+              source /root/.cargo/env
+              RUSTFLAGS='-C link-arg=-static-libstdc++ -C link-arg=-static-libgcc' cargo build --release --bin rocksdb-dedup
+              strip target/release/rocksdb-dedup || true
               chmod -R a+rwx target/
             "
 
-      - name: Verify Binary is Statically Linked
+      - name: Verify Binary Compatibility
         run: |
-          file target/x86_64-unknown-linux-musl/release/rocksdb-dedup
-          ldd target/x86_64-unknown-linux-musl/release/rocksdb-dedup || true
+          file target/release/rocksdb-dedup
+          ldd target/release/rocksdb-dedup || true
+          objdump -p target/release/rocksdb-dedup | grep -E "GLIBC|GLIBCXX" || true
 
-      - name: Package Release Assets (Linux Musl Static)
+      - name: Package Release Assets (Linux)
         run: |
-          mkdir -p package-musl
-          cp target/x86_64-unknown-linux-musl/release/rocksdb-dedup package-musl/
-          cp dedup.example.toml package-musl/
-          cp DELIVERY.md package-musl/
-          mkdir -p package-musl/grafana
-          cp grafana/rocksdb_dedup_dashboard.json package-musl/grafana/
-          # 生成 musl 专用包以及通用零依赖 Linux 包
-          tar -czvf rocksdb-dedup-linux-x86_64-musl.tar.gz -C package-musl .
-          tar -czvf rocksdb-dedup-linux-x86_64.tar.gz -C package-musl .
+          mkdir -p package-linux
+          cp target/release/rocksdb-dedup package-linux/
+          cp dedup.example.toml package-linux/
+          cp DELIVERY.md package-linux/
+          mkdir -p package-linux/grafana
+          cp grafana/rocksdb_dedup_dashboard.json package-linux/grafana/
+          tar -czvf rocksdb-dedup-linux-x86_64.tar.gz -C package-linux .
+          cp rocksdb-dedup-linux-x86_64.tar.gz rocksdb-dedup-linux-x86_64-musl.tar.gz
 
       - name: Upload Artifact to GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            rocksdb-dedup-linux-x86_64-musl.tar.gz
             rocksdb-dedup-linux-x86_64.tar.gz
+            rocksdb-dedup-linux-x86_64-musl.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: false
